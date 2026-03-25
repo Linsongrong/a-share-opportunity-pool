@@ -1,0 +1,39 @@
+{
+  "version": "1.0.0",
+  "weights": {
+    "fundamental": 30,
+    "technical": 20,
+    "capital": 15,
+    "message": 35
+  },
+  "thresholds": {
+    "coreScore": 74,
+    "watchScore": 68,
+    "maxRiskForCore": 10
+  },
+  "pool": {
+    "coreSize": 10,
+    "watchSize": 20,
+    "shortlistSize": 80
+  },
+  "filters": {
+    "minAmount": 200000000,
+    "minPrice": 2,
+    "minHistoryDays": 40
+  },
+  "live": {
+    "pageSize": 100,
+    "fetchConcurrency": 4,
+    "klineConcurrency": 6,
+    "boardPageSize": 100
+  },
+  "risk": {
+    "stPenalty": 30,
+    "negativePePenalty": 6,
+    "lowRoePenalty": 4,
+    "lowLiquidityPenalty": 8,
+    "overheatPenalty": 5,
+    "weakTrendPenalty": 3,
+    "newListingPenalty": 6
+  }
+}

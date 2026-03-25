@@ -1,0 +1,299 @@
+{
+  "asOf": "2026-03-25",
+  "boards": [
+    {
+      "name": "白酒Ⅱ",
+      "pctChange": 1.2,
+      "rank": 16,
+      "leader": "贵州茅台"
+    },
+    {
+      "name": "家电零部件",
+      "pctChange": 2.8,
+      "rank": 6,
+      "leader": "三花智控"
+    },
+    {
+      "name": "消费电子",
+      "pctChange": 4.3,
+      "rank": 3,
+      "leader": "工业富联"
+    },
+    {
+      "name": "通信设备",
+      "pctChange": 5.1,
+      "rank": 2,
+      "leader": "中际旭创"
+    },
+    {
+      "name": "功率半导体",
+      "pctChange": 3.4,
+      "rank": 5,
+      "leader": "斯达半导"
+    },
+    {
+      "name": "汽车整车",
+      "pctChange": 2.2,
+      "rank": 8,
+      "leader": "比亚迪"
+    }
+  ],
+  "stocks": [
+    {
+      "snapshot": {
+        "code": "600519",
+        "name": "贵州茅台",
+        "industry": "白酒Ⅱ",
+        "price": 1410.27,
+        "pctChange": 0.21,
+        "amount": 3677905549,
+        "turnoverRate": 0.21,
+        "pe": 20.5,
+        "pb": 6.87,
+        "marketCap": 1766039116108,
+        "floatCap": 1766039116108,
+        "change60d": 8.2,
+        "changeYtd": 4.1,
+        "roe": 24.6,
+        "mainNetInflow": 182000000
+      },
+      "technical": {
+        "close": 1410.27,
+        "ma20": 1394.2,
+        "ma60": 1378.5,
+        "rsi14": 58.3,
+        "macdHist": 1.82,
+        "bollingerPos": 0.71,
+        "drawdown20": 1.7,
+        "change5": 0.6,
+        "change20": 3.4,
+        "candlesAvailable": 120,
+        "freshBreakout": false
+      }
+    },
+    {
+      "snapshot": {
+        "code": "002050",
+        "name": "三花智控",
+        "industry": "家电零部件",
+        "price": 38.64,
+        "pctChange": 4.72,
+        "amount": 6450000000,
+        "turnoverRate": 5.21,
+        "pe": 28.9,
+        "pb": 5.42,
+        "marketCap": 144000000000,
+        "floatCap": 121000000000,
+        "change60d": 31.5,
+        "changeYtd": 22.7,
+        "roe": 18.4,
+        "mainNetInflow": 918000000
+      },
+      "technical": {
+        "close": 38.64,
+        "ma20": 35.2,
+        "ma60": 31.6,
+        "rsi14": 67.5,
+        "macdHist": 2.44,
+        "bollingerPos": 0.88,
+        "drawdown20": 0.8,
+        "change5": 6.5,
+        "change20": 12.6,
+        "candlesAvailable": 120,
+        "freshBreakout": true
+      }
+    },
+    {
+      "snapshot": {
+        "code": "300308",
+        "name": "中际旭创",
+        "industry": "通信设备",
+        "price": 198.5,
+        "pctChange": 6.31,
+        "amount": 8200000000,
+        "turnoverRate": 7.46,
+        "pe": 31.8,
+        "pb": 8.21,
+        "marketCap": 222000000000,
+        "floatCap": 194000000000,
+        "change60d": 42.7,
+        "changeYtd": 28.4,
+        "roe": 22.1,
+        "mainNetInflow": 1460000000
+      },
+      "technical": {
+        "close": 198.5,
+        "ma20": 184.3,
+        "ma60": 168.9,
+        "rsi14": 71.8,
+        "macdHist": 3.18,
+        "bollingerPos": 0.93,
+        "drawdown20": 0.3,
+        "change5": 9.2,
+        "change20": 15.8,
+        "candlesAvailable": 120,
+        "freshBreakout": true
+      }
+    },
+    {
+      "snapshot": {
+        "code": "603986",
+        "name": "兆易创新",
+        "industry": "功率半导体",
+        "price": 116.3,
+        "pctChange": 3.85,
+        "amount": 2850000000,
+        "turnoverRate": 3.62,
+        "pe": 41.6,
+        "pb": 4.83,
+        "marketCap": 77600000000,
+        "floatCap": 75400000000,
+        "change60d": 24.1,
+        "changeYtd": 17.3,
+        "roe": 12.7,
+        "mainNetInflow": 262000000
+      },
+      "technical": {
+        "close": 116.3,
+        "ma20": 112.8,
+        "ma60": 108.2,
+        "rsi14": 61.1,
+        "macdHist": 1.17,
+        "bollingerPos": 0.76,
+        "drawdown20": 2.2,
+        "change5": 2.8,
+        "change20": 7.6,
+        "candlesAvailable": 120,
+        "freshBreakout": false
+      }
+    },
+    {
+      "snapshot": {
+        "code": "002594",
+        "name": "比亚迪",
+        "industry": "汽车整车",
+        "price": 246.8,
+        "pctChange": 1.82,
+        "amount": 4760000000,
+        "turnoverRate": 1.93,
+        "pe": 22.4,
+        "pb": 4.95,
+        "marketCap": 718000000000,
+        "floatCap": 472000000000,
+        "change60d": 18.7,
+        "changeYtd": 14.9,
+        "roe": 20.2,
+        "mainNetInflow": 406000000
+      },
+      "technical": {
+        "close": 246.8,
+        "ma20": 241.7,
+        "ma60": 233.6,
+        "rsi14": 55.9,
+        "macdHist": 0.88,
+        "bollingerPos": 0.68,
+        "drawdown20": 3.1,
+        "change5": 1.4,
+        "change20": 4.7,
+        "candlesAvailable": 120,
+        "freshBreakout": false
+      }
+    },
+    {
+      "snapshot": {
+        "code": "000333",
+        "name": "美的集团",
+        "industry": "白色家电",
+        "price": 73.1,
+        "pctChange": -0.42,
+        "amount": 1320000000,
+        "turnoverRate": 0.48,
+        "pe": 13.8,
+        "pb": 3.02,
+        "marketCap": 513000000000,
+        "floatCap": 488000000000,
+        "change60d": 2.5,
+        "changeYtd": 5.4,
+        "roe": 22.8,
+        "mainNetInflow": -58000000
+      },
+      "technical": {
+        "close": 73.1,
+        "ma20": 73.8,
+        "ma60": 72.9,
+        "rsi14": 47.3,
+        "macdHist": -0.22,
+        "bollingerPos": 0.44,
+        "drawdown20": 4.5,
+        "change5": -1.1,
+        "change20": -0.8,
+        "candlesAvailable": 120,
+        "freshBreakout": false
+      }
+    },
+    {
+      "snapshot": {
+        "code": "600777",
+        "name": "ST新潮",
+        "industry": "油气开采",
+        "price": 3.9,
+        "pctChange": 0.51,
+        "amount": 108000000,
+        "turnoverRate": 0.9,
+        "pe": 9.2,
+        "pb": 1.12,
+        "marketCap": 26500000000,
+        "floatCap": 25200000000,
+        "change60d": -4.2,
+        "changeYtd": -3.5,
+        "roe": 8.4,
+        "mainNetInflow": -12000000
+      },
+      "technical": {
+        "close": 3.9,
+        "ma20": 3.92,
+        "ma60": 3.98,
+        "rsi14": 45.1,
+        "macdHist": -0.03,
+        "bollingerPos": 0.48,
+        "drawdown20": 5.4,
+        "change5": -0.4,
+        "change20": -1.2,
+        "candlesAvailable": 120,
+        "freshBreakout": false
+      }
+    },
+    {
+      "snapshot": {
+        "code": "301234",
+        "name": "示例新股",
+        "industry": "消费电子",
+        "price": 18.2,
+        "pctChange": 11.8,
+        "amount": 980000000,
+        "turnoverRate": 36.8,
+        "pe": -45.0,
+        "pb": 7.9,
+        "marketCap": 9100000000,
+        "floatCap": 1900000000,
+        "change60d": 95.0,
+        "changeYtd": 95.0,
+        "roe": -3.5,
+        "mainNetInflow": 188000000
+      },
+      "technical": {
+        "close": 18.2,
+        "ma20": 14.6,
+        "ma60": 0,
+        "rsi14": 84.4,
+        "macdHist": 0.92,
+        "bollingerPos": 1.12,
+        "drawdown20": 0.0,
+        "change5": 21.4,
+        "change20": 49.3,
+        "candlesAvailable": 18,
+        "freshBreakout": true
+      }
+    }
+  ]
+}
