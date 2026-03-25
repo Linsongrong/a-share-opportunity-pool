@@ -7,6 +7,7 @@
 - `scripts/validate_a_share_opportunity_pool.mjs` 负责自检
 - `data/opportunity_pool/catalyst_overrides.json` 负责补充你人工核验过的催化信息
 - `data/opportunity_pool/latest.json` 和 `reports/opportunity_pool/*.md` 是运行产物
+- `data/opportunity_pool/cache/` 负责保存行情、K线和慢变量缓存
 
 ## 环境要求
 
@@ -14,6 +15,26 @@
 - 能访问公开行情接口
 - 不需要 Python
 - 不需要额外 npm 包
+
+## Provider 策略
+
+这版已经内置降级链路，不再单点依赖新浪：
+
+- 全市场快照：新浪主，东财备，最后回退到本地缓存
+- 日线/K线：新浪主，腾讯备，东财再备，最后回退到本地缓存
+- 行业/概念/ROE：新浪主，失败时优先使用本地缓存
+
+默认缓存 TTL：
+
+- universe：10 分钟
+- technical：20 分钟
+- profile：1440 分钟
+
+如果 provider 被限流或临时抖动，脚本会继续跑，并在 `latest.json` 里写入：
+
+- `meta.providersUsed`
+- `meta.fallbackEvents`
+- `meta.warnings`
 
 ## 快速开始
 
@@ -139,5 +160,6 @@ JSON 里会包含：
 
 - `confidence` 只表示证据和数据质量，不参与核心池 / 观察池分类
 - live 模式会在 `latest.json` 里输出初筛解释，说明为什么从全市场缩到 shortlist
+- live 模式会优先用缓存降低新浪被 `456` 限流的概率
 
 如果你后续愿意接入更强的数据源，这套脚本可以继续往里扩。

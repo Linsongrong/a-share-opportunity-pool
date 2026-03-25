@@ -22,6 +22,7 @@ metadata:
 4. 如果用户要求“更重视消息面”或“补充公告验证”，先用 web 搜索和官方披露核验，再把核验结果写回 `data/opportunity_pool/catalyst_overrides.json`，最后重跑脚本。
 5. 读取结果时要同时看 `industry` 和 `concepts`，不要只用行业标签解释涨跌逻辑。
 6. 不得把北向或两融缺失当作利空；在零依赖 live 模式下这两项默认是 `N/A`。
+7. 如果 `meta.providersUsed` 或 `meta.fallbackEvents` 显示已经进入降级模式，回答用户时要明确说明当前结果是否使用了缓存或备用 provider。
 
 ## 推荐执行顺序
 
@@ -60,6 +61,8 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode sample
 - `data/opportunity_pool/latest.json`
 - `reports/opportunity_pool/*.md` 中最新的一份
 - `meta.preselection`
+- `meta.providersUsed`
+- `meta.fallbackEvents`
 
 ## 如何解释结果
 

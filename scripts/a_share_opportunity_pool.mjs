@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,8 @@ const PATHS = {
   catalystOverrides: path.join(ROOT, "data", "opportunity_pool", "catalyst_overrides.json"),
   sampleFixture: path.join(ROOT, "data", "opportunity_pool", "fixtures", "sample_market_snapshot.json"),
   outputJson: path.join(ROOT, "data", "opportunity_pool", "latest.json"),
-  reportsDir: path.join(ROOT, "reports", "opportunity_pool")
+  reportsDir: path.join(ROOT, "reports", "opportunity_pool"),
+  cacheDir: path.join(ROOT, "data", "opportunity_pool", "cache")
 };
 
 const A_SHARE_FIELDS = [
@@ -135,6 +136,46 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function minutesToMs(minutes) {
+  return Math.max(0, toNumber(minutes)) * 60 * 1000;
+}
+
+function createRuntime() {
+  return {
+    warnings: [],
+    providersUsed: [],
+    fallbackEvents: []
+  };
+}
+
+function pushUnique(list, value) {
+  if (!value || list.includes(value)) {
+    return;
+  }
+  list.push(value);
+}
+
+function recordProvider(runtime, provider) {
+  if (!runtime) {
+    return;
+  }
+  pushUnique(runtime.providersUsed, provider);
+}
+
+function recordWarning(runtime, warning) {
+  if (!runtime || !warning) {
+    return;
+  }
+  pushUnique(runtime.warnings, warning);
+}
+
+function recordFallback(runtime, fallback) {
+  if (!runtime || !fallback) {
+    return;
+  }
+  pushUnique(runtime.fallbackEvents, fallback);
+}
+
 function addDays(dateString, days) {
   const base = dateString ? new Date(dateString) : new Date();
   const next = new Date(base.getTime());
@@ -163,6 +204,14 @@ async function readJson(filePath) {
   return JSON.parse(raw);
 }
 
+async function readJsonIfExists(filePath) {
+  try {
+    return await readJson(filePath);
+  } catch {
+    return null;
+  }
+}
+
 async function writeJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -173,9 +222,54 @@ async function writeText(filePath, value) {
   await writeFile(filePath, value, "utf8");
 }
 
+async function getFileAgeMs(filePath) {
+  try {
+    const fileStat = await stat(filePath);
+    return Date.now() - fileStat.mtimeMs;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function cachePathFor(kind, identifier) {
+  return path.join(PATHS.cacheDir, kind, `${identifier}.json`);
+}
+
+async function readCacheEnvelope(filePath) {
+  return readJsonIfExists(filePath);
+}
+
+async function writeCacheEnvelope(filePath, value) {
+  await writeJson(filePath, {
+    cachedAt: nowIso(),
+    value
+  });
+}
+
+async function getCacheEntry(filePath, ttlMs) {
+  const envelope = await readCacheEnvelope(filePath);
+  if (!envelope?.value) {
+    return {
+      hasValue: false,
+      isFresh: false,
+      ageMs: Number.POSITIVE_INFINITY,
+      value: null
+    };
+  }
+
+  const ageMs = await getFileAgeMs(filePath);
+  return {
+    hasValue: true,
+    isFresh: ageMs <= ttlMs,
+    ageMs,
+    value: envelope.value
+  };
+}
+
 async function ensureWorkspaceFiles() {
   await mkdir(path.dirname(PATHS.outputJson), { recursive: true });
   await mkdir(PATHS.reportsDir, { recursive: true });
+  await mkdir(PATHS.cacheDir, { recursive: true });
   await ensureJsonFile(PATHS.catalystOverrides, { stock: {}, industry: {} });
 }
 
@@ -250,6 +344,70 @@ async function fetchText(url, encoding = "utf8") {
   }
 
   throw lastError;
+}
+
+function formatProviderError(provider, error) {
+  const message = error?.message || String(error);
+  return `${provider} failed: ${message}`;
+}
+
+async function resolveWithFallback({
+  cachePath,
+  ttlMs,
+  runtime,
+  providers,
+  staleLabel
+}) {
+  const cacheEntry = await getCacheEntry(cachePath, ttlMs);
+
+  if (cacheEntry.hasValue && cacheEntry.isFresh) {
+    recordProvider(runtime, `${staleLabel}:cache-fresh`);
+    return {
+      value: cacheEntry.value,
+      source: "cache-fresh",
+      stale: false
+    };
+  }
+
+  let lastError = null;
+
+  for (const [providerIndex, provider] of providers.entries()) {
+    try {
+      const value = await provider.fetch();
+      await writeCacheEnvelope(cachePath, value);
+      recordProvider(runtime, provider.name);
+
+      if (providerIndex > 0) {
+        recordFallback(runtime, `${staleLabel}:switched-to-${provider.name}`);
+      }
+
+      if (cacheEntry.hasValue) {
+        recordFallback(runtime, `${staleLabel}:refreshed-via-${provider.name}`);
+      }
+
+      return {
+        value,
+        source: provider.name,
+        stale: false
+      };
+    } catch (error) {
+      lastError = error;
+      recordWarning(runtime, formatProviderError(provider.name, error));
+    }
+  }
+
+  if (cacheEntry.hasValue) {
+    recordProvider(runtime, `${staleLabel}:cache-stale`);
+    recordFallback(runtime, `${staleLabel}:using-stale-cache`);
+    recordWarning(runtime, `${staleLabel} fell back to stale cache.`);
+    return {
+      value: cacheEntry.value,
+      source: "cache-stale",
+      stale: true
+    };
+  }
+
+  throw lastError ?? new Error(`${staleLabel} failed and no cache was available.`);
 }
 
 async function mapLimit(items, limit, iteratee) {
@@ -545,6 +703,28 @@ async function fetchSinaUniverse(config) {
   return pagesData.flat().map(normalizeSinaSnapshot);
 }
 
+async function fetchLiveUniverse(config, runtime) {
+  const cachePath = cachePathFor("universe", "live");
+  const ttlMs = minutesToMs(config.live.cacheTtlMinutes?.universe);
+
+  return resolveWithFallback({
+    cachePath,
+    ttlMs,
+    runtime,
+    staleLabel: "universe",
+    providers: [
+      {
+        name: "sina-universe",
+        fetch: () => fetchSinaUniverse(config)
+      },
+      {
+        name: "eastmoney-universe",
+        fetch: () => fetchAshareUniverse(config)
+      }
+    ]
+  });
+}
+
 function extractIndustryFromSinaHtml(html) {
   const match = html.match(
     /行业板块<\/td>\s*<th[^>]*>同行业个股<\/td>\s*<\/tr>\s*<tr>\s*<td[^>]*>([^<]+)<\/td>/i
@@ -622,19 +802,107 @@ async function fetchSinaTechnicalSnapshot(code) {
   return computeTechnicalFromCandles(candles);
 }
 
-async function enrichSinaSnapshot(snapshot) {
-  const [industryHtml, conceptHtml, financeHtml, technical] = await Promise.all([
-    fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/${snapshot.code}/menu_num/4.phtml`, "gb18030"),
-    fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/${snapshot.code}/menu_num/5.phtml`, "gb18030"),
-    fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vFD_FinancialGuideLine/stockid/${snapshot.code}/displaytype/4.phtml`, "gb18030"),
-    fetchSinaTechnicalSnapshot(snapshot.code)
+function parseTencentKlines(payload, symbol) {
+  const records =
+    payload?.data?.[symbol]?.qfqday ??
+    payload?.data?.[symbol]?.day ??
+    [];
+
+  return records.map((entry) => ({
+    date: entry[0],
+    open: toNumber(entry[1]),
+    close: toNumber(entry[2]),
+    high: toNumber(entry[3]),
+    low: toNumber(entry[4]),
+    volume: toNumber(entry[5]),
+    amount: NaN,
+    amplitude: NaN,
+    pctChange: NaN,
+    change: NaN,
+    turnover: NaN
+  }));
+}
+
+async function fetchTencentTechnicalSnapshot(code) {
+  const symbol = symbolFromCode(code);
+  const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${symbol},day,,,130,qfq`;
+  const payload = await fetchJson(url);
+  const candles = parseTencentKlines(payload, symbol);
+  return computeTechnicalFromCandles(candles);
+}
+
+async function fetchLiveTechnicalSnapshot(code, config, runtime) {
+  const cachePath = cachePathFor("technical", code);
+  const ttlMs = minutesToMs(config.live.cacheTtlMinutes?.technical);
+
+  return resolveWithFallback({
+    cachePath,
+    ttlMs,
+    runtime,
+    staleLabel: `technical:${code}`,
+    providers: [
+      {
+        name: "sina-technical",
+        fetch: () => fetchSinaTechnicalSnapshot(code)
+      },
+      {
+        name: "tencent-technical",
+        fetch: () => fetchTencentTechnicalSnapshot(code)
+      },
+      {
+        name: "eastmoney-technical",
+        fetch: () => fetchTechnicalSnapshot(code)
+      }
+    ]
+  });
+}
+
+async function fetchSinaProfileSnapshot(code) {
+  const [industryHtml, conceptHtml, financeHtml] = await Promise.all([
+    fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/${code}/menu_num/4.phtml`, "gb18030"),
+    fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/${code}/menu_num/5.phtml`, "gb18030"),
+    fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vFD_FinancialGuideLine/stockid/${code}/displaytype/4.phtml`, "gb18030")
   ]);
+
+  return {
+    industry: extractIndustryFromSinaHtml(industryHtml),
+    concepts: extractConceptsFromSinaHtml(conceptHtml),
+    roe: extractRoeFromSinaHtml(financeHtml)
+  };
+}
+
+async function fetchLiveProfileSnapshot(snapshot, config, runtime) {
+  const cachePath = cachePathFor("profile", snapshot.code);
+  const ttlMs = minutesToMs(config.live.cacheTtlMinutes?.profile);
+
+  return resolveWithFallback({
+    cachePath,
+    ttlMs,
+    runtime,
+    staleLabel: `profile:${snapshot.code}`,
+    providers: [
+      {
+        name: "sina-profile",
+        fetch: () => fetchSinaProfileSnapshot(snapshot.code)
+      }
+    ]
+  });
+}
+
+async function enrichLiveSnapshot(snapshot, config, runtime) {
+  const [profileResult, technicalResult] = await Promise.all([
+    fetchLiveProfileSnapshot(snapshot, config, runtime),
+    fetchLiveTechnicalSnapshot(snapshot.code, config, runtime)
+  ]);
+
+  const profile = profileResult.value;
+  const technical = technicalResult.value;
 
   const enrichedSnapshot = {
     ...snapshot,
-    industry: extractIndustryFromSinaHtml(industryHtml),
-    concepts: extractConceptsFromSinaHtml(conceptHtml),
-    roe: extractRoeFromSinaHtml(financeHtml),
+    industry: profile.industry || snapshot.industry || "未分类",
+    concepts: profile.concepts?.length ? profile.concepts : snapshot.concepts ?? [],
+    roe: Number.isFinite(profile.roe) ? profile.roe : snapshot.roe,
     change60d: toNumber(technical.change60, snapshot.change60d),
     changeYtd: snapshot.changeYtd
   };
@@ -1486,8 +1754,9 @@ async function loadSampleDataset() {
   };
 }
 
-async function loadLiveDataset(config, shortlistSize) {
-  const universe = await fetchSinaUniverse(config);
+async function loadLiveDataset(config, shortlistSize, runtime) {
+  const universeResult = await fetchLiveUniverse(config, runtime);
+  const universe = universeResult.value;
   const filterStats = {
     universeCount: universe.length,
     excludedByMinPrice: 0,
@@ -1515,9 +1784,9 @@ async function loadLiveDataset(config, shortlistSize) {
 
   const enrichedCandidates = await mapLimit(
     roughSorted,
-    config.live.klineConcurrency,
+    config.live.slowDataConcurrency ?? config.live.klineConcurrency,
     async ({ snapshot, preselection }) => {
-      const enriched = await enrichSinaSnapshot(snapshot);
+      const enriched = await enrichLiveSnapshot(snapshot, config, runtime);
       return {
         ...enriched,
         preselection
@@ -1555,6 +1824,7 @@ async function loadLiveDataset(config, shortlistSize) {
         eligibleCount: eligibleSnapshots.length,
         shortlistedCount: enrichedCandidates.length
       },
+      source: universeResult.source,
       model: "turnoverFit + liquidity + priceAction + valuationFit, then keep top shortlistSize for enrichment",
       cutoffScore: cutoff,
       shortlisted: enrichedCandidates.slice(0, 10).map((entry, index) => ({
@@ -1593,10 +1863,16 @@ async function runScan(options = {}) {
   const warnings = [];
 
   if (mode === "sample") {
+    const runtime = createRuntime();
+    recordProvider(runtime, "sample-fixture");
     dataset = await loadSampleDataset();
+    dataset.runtime = runtime;
     warnings.push("当前为样例数据，仅用于验证技能流程。");
   } else {
-    dataset = await loadLiveDataset(config, shortlistSize);
+    const runtime = createRuntime();
+    dataset = await loadLiveDataset(config, shortlistSize, runtime);
+    warnings.push(...runtime.warnings);
+    dataset.runtime = runtime;
   }
 
   const evaluated = dataset.candidates.map(({ snapshot, technical, preselection }) =>
@@ -1621,6 +1897,8 @@ async function runScan(options = {}) {
       configVersion: config.version,
       candidatesScanned: evaluated.length,
       warnings,
+      providersUsed: dataset.runtime?.providersUsed ?? [],
+      fallbackEvents: dataset.runtime?.fallbackEvents ?? [],
       confidenceRule: "confidence only measures data and evidence quality; classification only uses total score and risk deduction.",
       preselection: dataset.preselection ?? null
     },

@@ -25,7 +25,13 @@
     "pageSize": 100,
     "fetchConcurrency": 4,
     "klineConcurrency": 6,
-    "boardPageSize": 100
+    "slowDataConcurrency": 2,
+    "boardPageSize": 100,
+    "cacheTtlMinutes": {
+      "universe": 10,
+      "technical": 20,
+      "profile": 1440
+    }
   },
   "risk": {
     "stPenalty": 30,
