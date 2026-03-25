@@ -14,7 +14,9 @@
   "pool": {
     "coreSize": 10,
     "watchSize": 20,
-    "shortlistSize": 80
+    "shortlistSize": 80,
+    "maxPerIndustry": 2,
+    "secondNameMaxGap": 5
   },
   "filters": {
     "minAmount": 200000000,

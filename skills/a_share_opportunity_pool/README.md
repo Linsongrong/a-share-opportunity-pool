@@ -8,6 +8,7 @@
 - `data/opportunity_pool/catalyst_overrides.json` 负责补充你人工核验过的催化信息
 - `data/opportunity_pool/latest.json` 和 `reports/opportunity_pool/*.md` 是运行产物
 - `data/opportunity_pool/cache/` 负责保存行情、K线和慢变量缓存
+- `data/opportunity_pool/state/` 负责保存历史分数状态
 
 ## 环境要求
 
@@ -120,6 +121,8 @@ JSON 里会包含：
 - 四维得分
 - 风险扣分
 - 核心池 / 观察池 / 剔除
+- previousScore / scoreChange / isNew / isDropped
+- trendLabel / targetEntryRange / entryRangeStatus
 - 为什么是现在
 - 证据
 - 风险
@@ -138,6 +141,11 @@ JSON 里会包含：
 - `>= 70` 且风险扣分 `<= 10`：核心机会池
 - `64 - 69`：观察池
 - `< 64`：不入池
+
+行业集中度规则：
+
+- 同一行业默认最多保留 2 只
+- 第 2 只只有在与第 1 只分差不大且逻辑足够区分时才保留
 
 一票否决：
 

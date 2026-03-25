@@ -17,7 +17,8 @@ const PATHS = {
   sampleFixture: path.join(ROOT, "data", "opportunity_pool", "fixtures", "sample_market_snapshot.json"),
   outputJson: path.join(ROOT, "data", "opportunity_pool", "latest.json"),
   reportsDir: path.join(ROOT, "reports", "opportunity_pool"),
-  cacheDir: path.join(ROOT, "data", "opportunity_pool", "cache")
+  cacheDir: path.join(ROOT, "data", "opportunity_pool", "cache"),
+  stateDir: path.join(ROOT, "data", "opportunity_pool", "state")
 };
 
 const A_SHARE_FIELDS = [
@@ -235,6 +236,10 @@ function cachePathFor(kind, identifier) {
   return path.join(PATHS.cacheDir, kind, `${identifier}.json`);
 }
 
+function statePathFor(mode) {
+  return path.join(PATHS.stateDir, `${mode}.json`);
+}
+
 async function readCacheEnvelope(filePath) {
   return readJsonIfExists(filePath);
 }
@@ -244,6 +249,40 @@ async function writeCacheEnvelope(filePath, value) {
     cachedAt: nowIso(),
     value
   });
+}
+
+async function readState(mode) {
+  return (await readJsonIfExists(statePathFor(mode))) ?? {
+    mode,
+    generatedAt: null,
+    candidates: {}
+  };
+}
+
+async function writeState(mode, candidates) {
+  const payload = {
+    mode,
+    generatedAt: nowIso(),
+    candidates: Object.fromEntries(
+      candidates.map((candidate) => [
+        candidate.code,
+        {
+          code: candidate.code,
+          name: candidate.name,
+          industry: candidate.industry,
+          status: candidate.status,
+          totalScore: candidate.totalScore,
+          concepts: candidate.concepts ?? [],
+          trendLabel: candidate.trendLabel,
+          targetEntryRange: candidate.targetEntryRange,
+          entryRangeStatus: candidate.entryRangeStatus,
+          risks: candidate.risks ?? []
+        }
+      ])
+    )
+  };
+
+  await writeJson(statePathFor(mode), payload);
 }
 
 async function getCacheEntry(filePath, ttlMs) {
@@ -270,6 +309,7 @@ async function ensureWorkspaceFiles() {
   await mkdir(path.dirname(PATHS.outputJson), { recursive: true });
   await mkdir(PATHS.reportsDir, { recursive: true });
   await mkdir(PATHS.cacheDir, { recursive: true });
+  await mkdir(PATHS.stateDir, { recursive: true });
   await ensureJsonFile(PATHS.catalystOverrides, { stock: {}, industry: {} });
 }
 
@@ -585,6 +625,7 @@ function computeRsi(values, period = 14) {
 
 function computeTechnicalFromCandles(candles) {
   const closes = candles.map((candle) => candle.close);
+  const volumes = candles.map((candle) => candle.volume);
   const latest = candles.at(-1);
 
   if (!latest) {
@@ -598,6 +639,10 @@ function computeTechnicalFromCandles(candles) {
       drawdown20: null,
       change5: null,
       change20: null,
+      change60: null,
+      ma20Slope: null,
+      volumeRatio5v20: null,
+      upStreak: 0,
       candlesAvailable: 0,
       freshBreakout: false
     };
@@ -619,6 +664,22 @@ function computeTechnicalFromCandles(candles) {
     closes.length > 20 ? ratio(latest.close - closes.at(-21), closes.at(-21)) * 100 : null;
   const change60 =
     closes.length > 60 ? ratio(latest.close - closes.at(-61), closes.at(-61)) * 100 : change20;
+  const previousMa20 =
+    closes.length > 20 ? simpleMovingAverage(closes.slice(0, -1), 20) : null;
+  const ma20Slope = previousMa20 !== null ? ma20 - previousMa20 : null;
+  const volumeAvg5 = simpleMovingAverage(volumes, 5);
+  const volumeAvg20 = simpleMovingAverage(volumes, 20);
+  const volumeRatio5v20 =
+    volumeAvg5 !== null && volumeAvg20 !== null && volumeAvg20 !== 0 ? volumeAvg5 / volumeAvg20 : null;
+
+  let upStreak = 0;
+  for (let index = closes.length - 1; index > 0; index -= 1) {
+    if (closes[index] > closes[index - 1]) {
+      upStreak += 1;
+      continue;
+    }
+    break;
+  }
 
   const ema12 = ema(closes, 12);
   const ema26 = ema(closes, 26);
@@ -637,6 +698,9 @@ function computeTechnicalFromCandles(candles) {
     change5,
     change20,
     change60,
+    ma20Slope,
+    volumeRatio5v20,
+    upStreak,
     candlesAvailable: candles.length,
     freshBreakout: latest.close >= highest20 * 0.995 && latest.close > ma20 && lowest20 > 0
   };
@@ -986,10 +1050,16 @@ function scoreFundamental(snapshot) {
 }
 
 function scoreTechnical(snapshot, technical) {
+  const streakBonus = clamp(
+    technical.upStreak >= 3 ? 3 : technical.upStreak >= 2 ? 1 : 0,
+    0,
+    3
+  );
   const trend = clamp(
     (technical.close > technical.ma20 ? 4 : 1) +
       (technical.ma20 > technical.ma60 ? 3 : 1) +
-      (toNumber(technical.change20) > 0 ? 1 : 0),
+      (toNumber(technical.change20) > 0 ? 1 : 0) +
+      streakBonus,
     0,
     8
   );
@@ -1022,11 +1092,72 @@ function scoreTechnical(snapshot, technical) {
 
   return {
     score: clamp(trend + momentum + location, 0, 20),
-    components: { trend, momentum, location }
+    components: { trend, momentum, location, streakBonus }
   };
 }
 
+function getMarketCapTier(snapshot) {
+  const referenceCap = Math.max(toNumber(snapshot.marketCap), toNumber(snapshot.floatCap));
+  if (referenceCap >= 1e11) {
+    return "large";
+  }
+  if (referenceCap <= 2e10) {
+    return "small_mid";
+  }
+  return "mid";
+}
+
+function buildTargetEntryRange(technical) {
+  const lower = technical.ma20 * 0.95;
+  const upper = technical.ma20 * 1.05;
+  return {
+    lower: Number(lower.toFixed(2)),
+    upper: Number(upper.toFixed(2)),
+    label: `${lower.toFixed(2)}-${upper.toFixed(2)}`
+  };
+}
+
+function buildEntryRangeStatus(price, range) {
+  if (price < range.lower) {
+    return "below_range";
+  }
+  if (price > range.upper) {
+    return "above_range";
+  }
+  return "within_range";
+}
+
+function formatEntryRangeStatus(status) {
+  switch (status) {
+    case "below_range":
+      return "below_range（低于区间，偏低，可继续观察）";
+    case "above_range":
+      return "above_range（高于区间，偏高，谨慎）";
+    default:
+      return "within_range（处于关注区间内）";
+  }
+}
+
+function buildTrendLabel(snapshot, technical) {
+  const ma20Up = toNumber(technical.ma20Slope) > 0;
+  const ma20AboveMa60 = technical.ma20 > technical.ma60;
+  const midTermPositive = toNumber(snapshot.change60d) > 5 || toNumber(technical.change60) > 5;
+  const shortTermPositive = toNumber(technical.change20) > 0;
+
+  if (technical.close > technical.ma20 && ma20AboveMa60 && ma20Up && midTermPositive) {
+    return "uptrend";
+  }
+  if (technical.close > technical.ma20 && !ma20AboveMa60 && shortTermPositive) {
+    return "rebound";
+  }
+  if (technical.close < technical.ma20 && !ma20AboveMa60 && !ma20Up && toNumber(snapshot.change60d) < 0) {
+    return "downtrend";
+  }
+  return "sideways";
+}
+
 function scoreCapital(snapshot) {
+  const marketCapTier = getMarketCapTier(snapshot);
   const hasInflow = Number.isFinite(snapshot.mainNetInflow);
   const inflowRatio = hasInflow ? ratio(snapshot.mainNetInflow, snapshot.amount) * 100 : null;
   const inflow = hasInflow
@@ -1038,19 +1169,39 @@ function scoreCapital(snapshot) {
         { test: (value) => value <= -1, score: 0.5 }
       ])
     : null;
-  const turnover = scoreByThresholds(snapshot.turnoverRate, [
-    { test: (value) => value >= 2 && value <= 12, score: 4 },
-    { test: (value) => value > 12 && value <= 20, score: 3 },
-    { test: (value) => value >= 0.5 && value < 2, score: 2 },
-    { test: (value) => value > 20, score: 1.5 }
-  ]);
+  const turnover = marketCapTier === "large"
+    ? scoreByThresholds(snapshot.turnoverRate, [
+        { test: (value) => value >= 0.3 && value <= 5, score: 4 },
+        { test: (value) => value > 5 && value <= 10, score: 3 },
+        { test: (value) => value > 0, score: 2 }
+      ])
+    : scoreByThresholds(snapshot.turnoverRate, [
+        { test: (value) => value >= 2 && value <= 12, score: 4 },
+        { test: (value) => value > 12 && value <= 20, score: 3 },
+        { test: (value) => value >= 0.5 && value < 2, score: 2 },
+        { test: (value) => value > 20, score: 1.5 }
+      ]);
 
-  const liquidity = scoreByThresholds(snapshot.amount, [
-    { test: (value) => value >= 5e9, score: 3 },
-    { test: (value) => value >= 2e9, score: 2 },
-    { test: (value) => value >= 5e8, score: 1 },
-      { test: (value) => value > 0, score: 0.5 }
-  ]);
+  const liquidity = marketCapTier === "large"
+    ? scoreByThresholds(snapshot.amount, [
+        { test: (value) => value >= 2e9, score: 2.5 },
+        { test: (value) => value >= 1e9, score: 2 },
+        { test: (value) => value >= 5e8, score: 1.5 },
+        { test: (value) => value > 0, score: 0.5 }
+      ])
+    : marketCapTier === "small_mid"
+      ? scoreByThresholds(snapshot.amount, [
+          { test: (value) => value >= 2e9, score: 3 },
+          { test: (value) => value >= 8e8, score: 2.5 },
+          { test: (value) => value >= 3e8, score: 1.5 },
+          { test: (value) => value > 0, score: 0.5 }
+        ])
+      : scoreByThresholds(snapshot.amount, [
+          { test: (value) => value >= 5e9, score: 3 },
+          { test: (value) => value >= 2e9, score: 2 },
+          { test: (value) => value >= 5e8, score: 1 },
+          { test: (value) => value > 0, score: 0.5 }
+        ]);
 
   if (!hasInflow) {
     const normalized = clamp((turnover + liquidity) / 7, 0, 1) * 15;
@@ -1061,6 +1212,7 @@ function scoreCapital(snapshot) {
         inflowRatio: null,
         turnover,
         liquidity,
+        marketCapTier,
         mode: "fallback_without_flow"
       }
     };
@@ -1072,7 +1224,8 @@ function scoreCapital(snapshot) {
       inflow,
       inflowRatio,
       turnover,
-      liquidity
+      liquidity,
+      marketCapTier
     }
   };
 }
@@ -1214,6 +1367,7 @@ function scoreRisk(snapshot, technical, config) {
   const reasons = [];
   let total = 0;
   let veto = false;
+  const marketCapTier = getMarketCapTier(snapshot);
 
   if (snapshot.isSt) {
     total += config.risk.stPenalty;
@@ -1246,6 +1400,21 @@ function scoreRisk(snapshot, technical, config) {
   if (snapshot.turnoverRate > 25 && snapshot.pctChange > 8) {
     total += config.risk.overheatPenalty;
     reasons.push("高换手叠加大涨，存在短线过热风险");
+  }
+
+  if (technical.upStreak >= 5) {
+    total += 3;
+    reasons.push("连续 5 日上涨，短线过热风险上升");
+  }
+
+  if (marketCapTier === "small_mid" && toNumber(technical.volumeRatio5v20) > 0 && technical.volumeRatio5v20 < 0.75) {
+    total += 4;
+    reasons.push("中小盘股连续缩量，流动性风险上升");
+  }
+
+  if (marketCapTier === "small_mid" && snapshot.amount < 3e8) {
+    total += 2;
+    reasons.push("中小盘股成交额偏低");
   }
 
   if (technical.close < technical.ma20 && toNumber(technical.macdHist) <= 0) {
@@ -1382,12 +1551,75 @@ function buildConfidence(snapshot, technical, capital, catalysts) {
   };
 }
 
+function attachHistory(candidate, previousState, isDropped = false) {
+  const previous = previousState?.candidates?.[candidate.code] ?? null;
+  const previousScore = previous ? previous.totalScore : null;
+  const scoreChange = previousScore === null ? null : Number((candidate.totalScore - previousScore).toFixed(2));
+  const wasPooled = previous ? previous.status !== "剔除" : false;
+  const isPooled = candidate.status !== "剔除";
+
+  return {
+    ...candidate,
+    previousScore,
+    scoreChange,
+    isNew: isPooled && !wasPooled,
+    isDropped: isDropped || (!isPooled && wasPooled)
+  };
+}
+
+function attachPoolHistory(pools, previousState) {
+  const currentPoolCodes = new Set(
+    pools.core.concat(pools.watch).map((candidate) => candidate.code)
+  );
+
+  const attachOne = (candidate) => {
+    const previous = previousState?.candidates?.[candidate.code] ?? null;
+    const previousScore = previous ? previous.totalScore : null;
+    const scoreChange = previousScore === null ? null : Number((candidate.totalScore - previousScore).toFixed(2));
+    const wasPooled = previous ? previous.status !== "剔除" : false;
+    const isPooled = currentPoolCodes.has(candidate.code);
+
+    return {
+      ...candidate,
+      previousScore,
+      scoreChange,
+      isNew: isPooled && !wasPooled,
+      isDropped: !isPooled && wasPooled
+    };
+  };
+
+  return {
+    core: pools.core.map(attachOne),
+    watch: pools.watch.map(attachOne),
+    dropped: pools.dropped.map(attachOne)
+  };
+}
+
+function createHistoricalDropped(previousCandidate, marketDate) {
+  const note = "本次扫描未继续入池，保留上次分数供回溯。";
+  return {
+    ...previousCandidate,
+    status: "剔除",
+    previousScore: previousCandidate.totalScore,
+    scoreChange: null,
+    isNew: false,
+    isDropped: true,
+    nextReviewDate: addDays(`${marketDate}T00:00:00.000Z`, 1),
+    risks: (previousCandidate.risks ?? []).includes(note)
+      ? previousCandidate.risks
+      : [...(previousCandidate.risks ?? []), note]
+  };
+}
+
 function evaluateCandidate(snapshot, technical, boardLookup, themeLookup, catalysts, config, marketDate, preselection) {
   const fundamental = scoreFundamental(snapshot);
   const technicalScore = scoreTechnical(snapshot, technical);
   const capital = scoreCapital(snapshot);
   const message = scoreMessage(snapshot, technical, boardLookup, themeLookup, catalysts);
   const risk = scoreRisk(snapshot, technical, config);
+  const trendLabel = buildTrendLabel(snapshot, technical);
+  const targetEntryRange = buildTargetEntryRange(technical);
+  const entryRangeStatus = buildEntryRangeStatus(snapshot.price, targetEntryRange);
 
   const totalScore = clamp(
     fundamental.score + technicalScore.score + capital.score + message.score - risk.total,
@@ -1403,6 +1635,9 @@ function evaluateCandidate(snapshot, technical, boardLookup, themeLookup, cataly
     name: snapshot.name,
     industry: snapshot.industry,
     concepts: snapshot.concepts ?? [],
+    trendLabel,
+    targetEntryRange,
+    entryRangeStatus,
     status,
     totalScore: Number(totalScore.toFixed(2)),
     confidence: Number(confidence.score.toFixed(2)),
@@ -1428,7 +1663,8 @@ function evaluateCandidate(snapshot, technical, boardLookup, themeLookup, cataly
       boardPctChange: message.components.boardPctChange,
       boardLeader: message.components.boardLeader,
       topThemes: message.components.topThemes,
-      narrativeThemes: message.components.narrativeThemes
+      narrativeThemes: message.components.narrativeThemes,
+      marketCapTier: capital.components.marketCapTier
     }
   };
 }
@@ -1442,11 +1678,145 @@ function compareByScore(left, right) {
   );
 }
 
+function getIndustryLimitConfig(config) {
+  return {
+    maxPerIndustry: config.pool.maxPerIndustry ?? 2,
+    secondMaxGap: config.pool.secondNameMaxGap ?? 5
+  };
+}
+
+function intersectionSize(left, right) {
+  const rightSet = new Set(right);
+  let count = 0;
+  for (const item of left) {
+    if (rightSet.has(item)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function buildSecondNameDifferentiation(firstCandidate, secondCandidate) {
+  const firstConcepts = firstCandidate.concepts ?? [];
+  const secondConcepts = secondCandidate.concepts ?? [];
+  const sharedConcepts = intersectionSize(firstConcepts, secondConcepts);
+  const unionCount = new Set([...firstConcepts, ...secondConcepts]).size;
+  const overlapRatio = unionCount === 0 ? 0 : sharedConcepts / unionCount;
+  const firstTheme = firstCandidate.raw?.narrativeThemes?.[0]?.name ?? null;
+  const secondTheme = secondCandidate.raw?.narrativeThemes?.[0]?.name ?? null;
+
+  const reasons = [];
+  if (firstCandidate.trendLabel !== secondCandidate.trendLabel) {
+    reasons.push("趋势标签不同");
+  }
+  if (firstTheme && secondTheme && firstTheme !== secondTheme) {
+    reasons.push("核心题材不同");
+  }
+  if (overlapRatio < 0.5) {
+    reasons.push("概念重合度较低");
+  }
+
+  return {
+    differentiated: reasons.length > 0,
+    overlapRatio,
+    reasons
+  };
+}
+
+function enforceIndustryConcentration(candidates, config) {
+  const { maxPerIndustry, secondMaxGap } = getIndustryLimitConfig(config);
+  const sorted = [...candidates].sort(compareByScore);
+  const kept = [];
+  const dropped = [];
+  const industryBuckets = new Map();
+
+  for (const candidate of sorted) {
+    if (candidate.status === "剔除") {
+      dropped.push(candidate);
+      continue;
+    }
+
+    const industry = candidate.industry || "未分类";
+    const bucket = industryBuckets.get(industry) ?? [];
+
+    if (bucket.length === 0) {
+      const enriched = {
+        ...candidate,
+        industryRank: 1,
+        industrySelectionReason: "行业内第一名，默认保留。"
+      };
+      bucket.push(enriched);
+      industryBuckets.set(industry, bucket);
+      kept.push(enriched);
+      continue;
+    }
+
+    if (bucket.length >= maxPerIndustry) {
+      dropped.push({
+        ...candidate,
+        status: "剔除",
+        isDropped: true,
+        industryRank: bucket.length + 1,
+        industrySelectionReason: `同一行业最多保留 ${maxPerIndustry} 只。`,
+        risks: [...(candidate.risks ?? []), `同一行业超过 ${maxPerIndustry} 只，按板块内排序剔除。`]
+      });
+      continue;
+    }
+
+    const firstCandidate = bucket[0];
+    const scoreGap = Number((firstCandidate.totalScore - candidate.totalScore).toFixed(2));
+    const differentiation = buildSecondNameDifferentiation(firstCandidate, candidate);
+
+    if (scoreGap <= secondMaxGap && differentiation.differentiated) {
+      const enriched = {
+        ...candidate,
+        industryRank: bucket.length + 1,
+        industrySelectionReason: `与行业第一名分差 ${scoreGap} 分，且${differentiation.reasons.join("、")}。`
+      };
+      bucket.push(enriched);
+      industryBuckets.set(industry, bucket);
+      kept.push(enriched);
+      continue;
+    }
+
+    dropped.push({
+      ...candidate,
+      status: "剔除",
+      isDropped: true,
+      industryRank: bucket.length + 1,
+      industrySelectionReason: differentiation.differentiated
+        ? `与行业第一名分差 ${scoreGap} 分，超过 ${secondMaxGap} 分阈值。`
+        : `与行业第一名分差 ${scoreGap} 分，且题材/趋势区分不足。`,
+      risks: [
+        ...(candidate.risks ?? []),
+        differentiation.differentiated
+          ? "同一行业第二名分差过大，按行业集中度规则剔除。"
+          : "同一行业题材和趋势区分不足，按行业集中度规则剔除。"
+      ]
+    });
+  }
+
+  return { kept, dropped };
+}
+
 function summarizePool(candidates, coreSize, watchSize) {
   const sorted = [...candidates].sort(compareByScore);
-  const core = sorted.filter((candidate) => candidate.status === "核心机会池").slice(0, coreSize);
-  const watch = sorted.filter((candidate) => candidate.status === "观察池").slice(0, watchSize);
-  const dropped = sorted.filter((candidate) => candidate.status === "剔除");
+  const baseCore = sorted.filter((candidate) => candidate.status === "核心机会池");
+  const baseWatch = sorted.filter((candidate) => candidate.status === "观察池");
+  const baseDropped = sorted.filter((candidate) => candidate.status === "剔除");
+  const core = baseCore.slice(0, coreSize);
+  const watch = baseWatch.slice(0, watchSize);
+  const overflowCore = baseCore.slice(coreSize).map((candidate) => ({
+    ...candidate,
+    status: "剔除",
+    risks: [...(candidate.risks ?? []), "超过核心池数量上限，本次未进入最终发布池。"]
+  }));
+  const overflowWatch = baseWatch.slice(watchSize).map((candidate) => ({
+    ...candidate,
+    status: "剔除",
+    risks: [...(candidate.risks ?? []), "超过观察池数量上限，本次未进入最终发布池。"]
+  }));
+  const dropped = [...baseDropped, ...overflowCore, ...overflowWatch].sort(compareByScore);
 
   return { core, watch, dropped };
 }
@@ -1463,15 +1833,20 @@ function buildReport(result) {
   lines.push(`- 剔除：${result.summary.droppedCount}`);
   lines.push(`- 说明：${result.summary.note}`);
   lines.push(`- 置信度说明：${result.meta.confidenceRule}`);
+  if (result.meta.preselection?.stats) {
+    lines.push(
+      `- 初筛统计：全市场 ${result.meta.preselection.stats.universeCount} -> 可用 ${result.meta.preselection.stats.eligibleCount} -> shortlist ${result.meta.preselection.stats.shortlistedCount}`
+    );
+  }
   lines.push("");
   lines.push("## 核心机会池");
   lines.push("");
-  lines.push("| 代码 | 名称 | 总分 | 基本面 | 技术面 | 资金面 | 消息面 | 风险扣分 | 行业 |");
-  lines.push("| ---- | ---- | ---- | ------ | ------ | ------ | ------ | -------- | ---- |");
+  lines.push("| 代码 | 名称 | 总分 | 趋势 | 区间 | 基本面 | 技术面 | 资金面 | 消息面 | 风险扣分 | 行业 |");
+  lines.push("| ---- | ---- | ---- | ---- | ---- | ------ | ------ | ------ | ------ | -------- | ---- |");
 
   for (const candidate of result.pools.core) {
     lines.push(
-      `| ${candidate.code} | ${candidate.name} | ${candidate.totalScore} | ${candidate.scores.fundamental} | ${candidate.scores.technical} | ${candidate.scores.capital} | ${candidate.scores.message} | ${candidate.scores.riskDeduction} | ${candidate.industry} |`
+      `| ${candidate.code} | ${candidate.name} | ${candidate.totalScore} | ${candidate.trendLabel} | ${candidate.targetEntryRange.label} | ${candidate.scores.fundamental} | ${candidate.scores.technical} | ${candidate.scores.capital} | ${candidate.scores.message} | ${candidate.scores.riskDeduction} | ${candidate.industry} |`
     );
   }
 
@@ -1492,10 +1867,18 @@ function buildReport(result) {
     lines.push(`### ${candidate.code} ${candidate.name}`);
     lines.push("");
     lines.push(`- 结论：${candidate.status}`);
+    lines.push(`- 板块内排序：${candidate.industryRank ?? "N/A"}，${candidate.industrySelectionReason ?? "N/A"}`);
     lines.push(`- 题材/概念：${candidate.concepts.length > 0 ? candidate.concepts.slice(0, 5).join("、") : "N/A"}`);
+    lines.push(`- 趋势标签：${candidate.trendLabel}`);
+    lines.push(`- 关注区间：${candidate.targetEntryRange.label}`);
+    lines.push(`- 区间位置：${formatEntryRangeStatus(candidate.entryRangeStatus)}`);
     lines.push(`- 为什么是现在：${candidate.whyNow}`);
     lines.push(`- 证据：${candidate.evidence.join(" ")}`);
     lines.push(`- 证据置信度：${candidate.confidence}，${candidate.confidenceReason}`);
+    lines.push(`- 上次分数：${candidate.previousScore ?? "N/A"}`);
+    lines.push(`- 本次分差：${candidate.scoreChange ?? "N/A"}`);
+    lines.push(`- 是否新入池：${candidate.isNew ? "true" : "false"}`);
+    lines.push(`- 是否本次调出：${candidate.isDropped ? "true" : "false"}`);
     lines.push(`- 主要风险：${candidate.risks.join("；")}`);
     lines.push(`- 触发条件：${candidate.triggers.join("；")}`);
     lines.push(`- 失效条件：${candidate.invalidation.join("；")}`);
@@ -1510,7 +1893,9 @@ function buildReport(result) {
     lines.push("## 调出或剔除");
     lines.push("");
     for (const candidate of result.pools.dropped.slice(0, 10)) {
-      lines.push(`- ${candidate.code} ${candidate.name}：${candidate.risks.join("；")}`);
+      lines.push(
+        `- ${candidate.code} ${candidate.name}：${candidate.risks.join("；")}；上次分数 ${candidate.previousScore ?? "N/A"}；本次调出 ${candidate.isDropped ? "true" : "false"}`
+      );
     }
     lines.push("");
   }
@@ -1855,6 +2240,7 @@ async function runScan(options = {}) {
   const catalysts = await readJson(PATHS.catalystOverrides);
 
   const mode = options.mode ?? "live";
+  const stateKey = options.stateKey ?? mode;
   const shortlistSize = toNumber(options.shortlistSize, config.pool.shortlistSize);
   const coreSize = toNumber(options.coreSize, config.pool.coreSize);
   const watchSize = toNumber(options.watchSize, config.pool.watchSize);
@@ -1875,6 +2261,8 @@ async function runScan(options = {}) {
     dataset.runtime = runtime;
   }
 
+  const previousState = await readState(stateKey);
+
   const evaluated = dataset.candidates.map(({ snapshot, technical, preselection }) =>
     evaluateCandidate(
       snapshot,
@@ -1888,7 +2276,26 @@ async function runScan(options = {}) {
     )
   );
 
-  const pools = summarizePool(evaluated, coreSize, watchSize);
+  const concentrated = enforceIndustryConcentration(evaluated, config);
+  const currentAllCandidates = [...concentrated.kept, ...concentrated.dropped];
+
+  const currentCodes = new Set(currentAllCandidates.map((candidate) => candidate.code));
+  const historicalDropped = Object.values(previousState.candidates)
+    .filter((previousCandidate) => previousCandidate.status !== "剔除" && !currentCodes.has(previousCandidate.code))
+    .map((previousCandidate) => createHistoricalDropped(previousCandidate, dataset.marketDate));
+
+  const poolsWithCurrent = summarizePool(currentAllCandidates, coreSize, watchSize);
+  const pools = attachPoolHistory(
+    {
+      core: poolsWithCurrent.core,
+      watch: poolsWithCurrent.watch,
+      dropped: poolsWithCurrent.dropped.concat(historicalDropped)
+    },
+    previousState
+  );
+
+  await writeState(stateKey, pools.core.concat(pools.watch, pools.dropped));
+
   const result = {
     meta: {
       generatedAt: nowIso(),
@@ -1900,7 +2307,8 @@ async function runScan(options = {}) {
       providersUsed: dataset.runtime?.providersUsed ?? [],
       fallbackEvents: dataset.runtime?.fallbackEvents ?? [],
       confidenceRule: "confidence only measures data and evidence quality; classification only uses total score and risk deduction.",
-      preselection: dataset.preselection ?? null
+      preselection: dataset.preselection ?? null,
+      historyStateMode: stateKey
     },
     summary: {
       coreCount: pools.core.length,
@@ -1925,7 +2333,7 @@ async function runScan(options = {}) {
 async function runInit() {
   await ensureWorkspaceFiles();
   return {
-    created: [PATHS.catalystOverrides, PATHS.reportsDir, path.dirname(PATHS.outputJson)]
+    created: [PATHS.catalystOverrides, PATHS.reportsDir, path.dirname(PATHS.outputJson), PATHS.stateDir]
   };
 }
 
@@ -1994,4 +2402,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   });
 }
 
-export { PATHS, buildReport, ensureWorkspaceFiles, loadConfig, runInit, runScan };
+export { PATHS, buildReport, enforceIndustryConcentration, ensureWorkspaceFiles, loadConfig, runInit, runScan };

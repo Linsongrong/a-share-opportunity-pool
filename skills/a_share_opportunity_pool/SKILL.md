@@ -23,6 +23,7 @@ metadata:
 5. 读取结果时要同时看 `industry` 和 `concepts`，不要只用行业标签解释涨跌逻辑。
 6. 不得把北向或两融缺失当作利空；在零依赖 live 模式下这两项默认是 `N/A`。
 7. 如果 `meta.providersUsed` 或 `meta.fallbackEvents` 显示已经进入降级模式，回答用户时要明确说明当前结果是否使用了缓存或备用 provider。
+8. 回答用户时要优先引用 `previousScore`、`scoreChange`、`trendLabel`、`targetEntryRange` 和 `entryRangeStatus`，不要只给静态总分。
 
 ## 推荐执行顺序
 
