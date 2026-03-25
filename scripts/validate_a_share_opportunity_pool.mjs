@@ -48,6 +48,8 @@ async function validateSampleRun() {
   const raw = JSON.parse(await readUtf8(outputPath));
   assert(Array.isArray(raw.pools.core), "latest.json 里的核心池格式不正确。");
   assert(raw.pools.core[0].evidence.length >= 1, "核心池股票缺少证据字段。");
+  assert(raw.meta.preselection !== null, "sample 模式缺少初筛解释信息。");
+  assert(typeof raw.pools.core[0].confidence === "number", "核心池股票缺少置信度字段。");
 
   return {
     outputPath,
@@ -69,6 +71,7 @@ async function validateLiveRun() {
   assert(result.summary.coreCount + result.summary.watchCount >= 1, "live 模式没有生成任何机会池结果。");
   assert(await fileExists(outputPath), "live 模式没有生成 latest.json。");
   assert(await fileExists(reportPath), "live 模式没有生成 Markdown 报告。");
+  assert(result.meta.preselection !== null, "live 模式缺少初筛解释信息。");
 
   return {
     outputPath,

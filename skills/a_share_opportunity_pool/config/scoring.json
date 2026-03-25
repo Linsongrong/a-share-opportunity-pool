@@ -7,8 +7,8 @@
     "message": 35
   },
   "thresholds": {
-    "coreScore": 74,
-    "watchScore": 68,
+    "coreScore": 70,
+    "watchScore": 64,
     "maxRiskForCore": 10
   },
   "pool": {

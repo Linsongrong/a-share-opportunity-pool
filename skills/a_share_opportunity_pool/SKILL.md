@@ -20,7 +20,8 @@ metadata:
 2. 默认优先使用 live 模式；如果 live 模式失败，再切到 sample 模式说明问题。
 3. 输出前必须先读取 `data/opportunity_pool/latest.json` 和最新的 Markdown 报告。
 4. 如果用户要求“更重视消息面”或“补充公告验证”，先用 web 搜索和官方披露核验，再把核验结果写回 `data/opportunity_pool/catalyst_overrides.json`，最后重跑脚本。
-5. 不得把北向或两融缺失当作利空；在零依赖 live 模式下这两项默认是 `N/A`。
+5. 读取结果时要同时看 `industry` 和 `concepts`，不要只用行业标签解释涨跌逻辑。
+6. 不得把北向或两融缺失当作利空；在零依赖 live 模式下这两项默认是 `N/A`。
 
 ## 推荐执行顺序
 
@@ -58,6 +59,7 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode sample
 
 - `data/opportunity_pool/latest.json`
 - `reports/opportunity_pool/*.md` 中最新的一份
+- `meta.preselection`
 
 ## 如何解释结果
 
@@ -73,6 +75,7 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode sample
 - 消息面：判断为什么是现在
 
 风险是独立扣分项，不要藏进四维分里。
+`confidence` 只表示证据和数据完整性，不参与核心池 / 观察池分类。
 
 ## 输出要求
 

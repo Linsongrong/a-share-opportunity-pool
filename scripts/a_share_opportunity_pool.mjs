@@ -506,6 +506,7 @@ function normalizeSinaSnapshot(row) {
     code: String(row.code),
     name: String(row.name),
     industry: "待补充",
+    concepts: [],
     price: toNumber(row.trade),
     pctChange: toNumber(row.changepercent),
     amount: toNumber(row.amount),
@@ -551,6 +552,39 @@ function extractIndustryFromSinaHtml(html) {
   return match?.[1]?.trim() || "未分类";
 }
 
+function extractConceptsFromSinaHtml(html) {
+  const sectionMatch = html.match(/所属概念板块<\/td>[\s\S]*?<\/table>/i);
+  const section = sectionMatch?.[0] ?? "";
+  const concepts = [];
+  const skipTerms = new Set([
+    "所属概念板块",
+    "概念板块",
+    "同概念个股",
+    "点击查看",
+    "本月解禁",
+    "深股通",
+    "沪股通",
+    "融资融券",
+    "基金重仓",
+    "社保重仓",
+    "MSCI概念",
+    "标普道琼斯A股",
+    "中证500",
+    "富时罗素",
+    "养老金持股"
+  ]);
+
+  for (const match of section.matchAll(/<td class="ct" align="center">([^<]+)<\/td>/g)) {
+    const value = match[1].trim();
+    if (!value || skipTerms.has(value)) {
+      continue;
+    }
+    concepts.push(value);
+  }
+
+  return [...new Set(concepts)];
+}
+
 function extractRoeFromSinaHtml(html) {
   const match = html.match(/净资产收益率\(%\)<\/a><\/td><td>([^<]+)<\/td>/i);
   return toNumber(match?.[1], NaN);
@@ -589,8 +623,9 @@ async function fetchSinaTechnicalSnapshot(code) {
 }
 
 async function enrichSinaSnapshot(snapshot) {
-  const [industryHtml, financeHtml, technical] = await Promise.all([
+  const [industryHtml, conceptHtml, financeHtml, technical] = await Promise.all([
     fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/${snapshot.code}/menu_num/4.phtml`, "gb18030"),
+    fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/${snapshot.code}/menu_num/5.phtml`, "gb18030"),
     fetchText(`https://vip.stock.finance.sina.com.cn/corp/go.php/vFD_FinancialGuideLine/stockid/${snapshot.code}/displaytype/4.phtml`, "gb18030"),
     fetchSinaTechnicalSnapshot(snapshot.code)
   ]);
@@ -598,6 +633,7 @@ async function enrichSinaSnapshot(snapshot) {
   const enrichedSnapshot = {
     ...snapshot,
     industry: extractIndustryFromSinaHtml(industryHtml),
+    concepts: extractConceptsFromSinaHtml(conceptHtml),
     roe: extractRoeFromSinaHtml(financeHtml),
     change60d: toNumber(technical.change60, snapshot.change60d),
     changeYtd: snapshot.changeYtd
@@ -773,26 +809,91 @@ function scoreCapital(snapshot) {
   };
 }
 
-function scoreMessage(snapshot, technical, boardLookup, catalysts) {
+function resolveTopThemes(concepts, themeLookup, limit = 3) {
+  return (concepts ?? [])
+    .map((concept) => {
+      const theme = themeLookup.get(concept);
+      return theme ? { ...theme, name: concept } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.rank - right.rank || right.pctChange - left.pctChange)
+    .slice(0, limit);
+}
+
+function conceptNarrativePriority(concept, theme) {
+  const value = concept ?? "";
+  let score = 0;
+
+  if (/(苹果|苹果产业链|苹果三星)/i.test(value)) {
+    score += 4;
+  }
+  if (/(苹果|华为|AI|苹果产业链|苹果三星|消费电子|高速连接器|连接器|CPO|算力)/i.test(value)) {
+    score += 6;
+  }
+  if (/(苹果|华为|AI|算力|CPO|高速连接器|连接器|消费电子|光模块|光通信|机器人|智能|汽车电子|半导体|液冷|眼镜|耳机|产业链)/i.test(value)) {
+    score += 5;
+  }
+  if (/(概念|产业链|电子|通信|连接器|模块|汽车|机器人|算力|液冷)/i.test(value)) {
+    score += 2;
+  }
+  if (/(大盘|中盘|区域|参股|汇金|股权激励|预盈预增|解禁|社保|基金|MSCI|富时|中证)/i.test(value)) {
+    score -= 4;
+  }
+
+  if (theme) {
+    score += scoreByThresholds(theme.rank, [
+      { test: (rank) => rank <= 10, score: 3 },
+      { test: (rank) => rank <= 30, score: 2 },
+      { test: (rank) => rank <= 60, score: 1 }
+    ]);
+  }
+
+  return score;
+}
+
+function resolveNarrativeThemes(concepts, themeLookup, limit = 3) {
+  return (concepts ?? [])
+    .map((concept) => {
+      const theme = themeLookup.get(concept) ?? null;
+      return {
+        name: concept,
+        rank: theme?.rank ?? 999,
+        pctChange: theme?.pctChange ?? 0,
+        leader: theme?.leader ?? "",
+        narrativePriority: conceptNarrativePriority(concept, theme)
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.narrativePriority - left.narrativePriority ||
+        left.rank - right.rank ||
+        right.pctChange - left.pctChange
+    )
+    .slice(0, limit);
+}
+
+function scoreMessage(snapshot, technical, boardLookup, themeLookup, catalysts) {
   const board = boardLookup.get(snapshot.industry) ?? {
     rank: 999,
     pctChange: 0,
     leader: ""
   };
+  const topThemes = resolveTopThemes(snapshot.concepts, themeLookup);
+  const narrativeThemes = resolveNarrativeThemes(snapshot.concepts, themeLookup);
 
   const boardHeat = clamp(
     scoreByThresholds(board.rank, [
-      { test: (value) => value <= 3, score: 12 },
-      { test: (value) => value <= 10, score: 9 },
-      { test: (value) => value <= 20, score: 6 },
+      { test: (value) => value <= 3, score: 10 },
+      { test: (value) => value <= 10, score: 7 },
+      { test: (value) => value <= 20, score: 5 },
       { test: (value) => value <= 40, score: 3 }
     ]) + scoreByThresholds(board.pctChange, [
-      { test: (value) => value >= 5, score: 3 },
+      { test: (value) => value >= 5, score: 2 },
       { test: (value) => value >= 3, score: 2 },
       { test: (value) => value >= 1, score: 1 }
     ]),
     0,
-    12
+    10
   );
 
   const stockLeadership = clamp(
@@ -806,19 +907,37 @@ function scoreMessage(snapshot, technical, boardLookup, catalysts) {
     8
   );
 
-  const stockCatalyst = catalystScore(catalysts.stock?.[snapshot.code]?.score, 10);
-  const industryCatalyst = catalystScore(catalysts.industry?.[snapshot.industry]?.score, 5);
+  const themeHeat = clamp(
+    topThemes.reduce((total, theme, index) => {
+      const baseScore = scoreByThresholds(theme.rank, [
+        { test: (value) => value <= 3, score: 3.5 },
+        { test: (value) => value <= 10, score: 2.5 },
+        { test: (value) => value <= 20, score: 1.5 },
+        { test: (value) => value <= 30, score: 0.5 }
+      ]);
+      const recencyWeight = index === 0 ? 1 : 0.6;
+      return total + baseScore * recencyWeight;
+    }, 0),
+    0,
+    6
+  );
+
+  const stockCatalyst = catalystScore(catalysts.stock?.[snapshot.code]?.score, 7);
+  const industryCatalyst = catalystScore(catalysts.industry?.[snapshot.industry]?.score, 4);
 
   return {
-    score: clamp(boardHeat + stockLeadership + stockCatalyst + industryCatalyst, 0, 35),
+    score: clamp(boardHeat + themeHeat + stockLeadership + stockCatalyst + industryCatalyst, 0, 35),
     components: {
       boardHeat,
+      themeHeat,
       stockLeadership,
       stockCatalyst,
       industryCatalyst,
       boardRank: board.rank,
       boardPctChange: board.pctChange,
-      boardLeader: board.leader
+      boardLeader: board.leader,
+      topThemes,
+      narrativeThemes
     }
   };
 }
@@ -889,6 +1008,10 @@ function buildStatus(totalScore, risk, config) {
 
 function buildEvidence(snapshot, technical, message, capital, catalysts) {
   const evidence = [];
+  const themeSummary =
+    message.components.narrativeThemes.length > 0
+      ? `题材线索 ${message.components.narrativeThemes.map((theme) => theme.name).join(" / ")}。`
+      : null;
   const flowText =
     capital.components.inflowRatio === null
       ? `当前 provider 未提供主力净流入，改用换手率 ${formatPercent(snapshot.turnoverRate)} 与成交额 ${formatMoney(snapshot.amount)} 做资金确认。`
@@ -900,6 +1023,9 @@ function buildEvidence(snapshot, technical, message, capital, catalysts) {
   evidence.push(
     `ROE ${formatNumber(snapshot.roe)}，动态PE ${formatNumber(snapshot.pe)}，近60日涨跌幅 ${formatPercent(snapshot.change60d)}。`
   );
+  if (themeSummary) {
+    evidence.push(themeSummary);
+  }
   evidence.push(flowText);
 
   const stockCatalyst = catalysts.stock?.[snapshot.code];
@@ -912,7 +1038,9 @@ function buildEvidence(snapshot, technical, message, capital, catalysts) {
 
 function buildWhyNow(snapshot, technical) {
   const breakoutText = technical.freshBreakout ? "并伴随阶段新高确认" : "且没有出现明显破位";
-  return `${snapshot.industry}板块热度居前，${snapshot.name}当日涨跌幅 ${formatPercent(snapshot.pctChange)}，近20日趋势向上${breakoutText}。`;
+  const conceptText =
+    (snapshot.concepts ?? []).length > 0 ? `题材涉及${snapshot.concepts.slice(0, 2).join("、")}，` : "";
+  return `${snapshot.industry}板块热度居前，${conceptText}${snapshot.name}当日涨跌幅 ${formatPercent(snapshot.pctChange)}，近20日趋势向上${breakoutText}。`;
 }
 
 function buildTriggers(snapshot, technical) {
@@ -929,28 +1057,68 @@ function buildInvalidation(technical) {
   ];
 }
 
-function buildConfidence(status, risk, catalysts, message) {
-  if (status === "剔除" && risk.veto) {
-    return 85;
-  }
-  const catalystCount =
-    (catalysts.stock ? Object.keys(catalysts.stock).length : 0) +
-    (catalysts.industry ? Object.keys(catalysts.industry).length : 0);
+function buildConfidence(snapshot, technical, capital, catalysts) {
+  let score = 50;
+  const reasons = [];
 
-  if (catalystCount > 0 && message.components.boardRank <= 10) {
-    return 78;
+  if (Number.isFinite(snapshot.roe)) {
+    score += 12;
+    reasons.push("ROE 已补齐");
+  } else {
+    reasons.push("ROE 缺失");
   }
-  if (message.components.boardRank <= 20) {
-    return 68;
+
+  if (technical.candlesAvailable >= 90) {
+    score += 12;
+    reasons.push("K线历史充足");
+  } else if (technical.candlesAvailable >= 40) {
+    score += 6;
+    reasons.push("K线历史基本够用");
+  } else {
+    reasons.push("K线历史偏短");
   }
-  return 58;
+
+  if (snapshot.industry && snapshot.industry !== "未分类" && snapshot.industry !== "待补充") {
+    score += 8;
+    reasons.push("行业信息完整");
+  } else {
+    reasons.push("行业信息一般");
+  }
+
+  if ((snapshot.concepts ?? []).length > 0) {
+    score += 8;
+    reasons.push("概念题材已补齐");
+  } else {
+    reasons.push("概念题材缺失");
+  }
+
+  if (capital.components.inflowRatio !== null) {
+    score += 7;
+    reasons.push("资金流字段完整");
+  } else {
+    score += 3;
+    reasons.push("资金流使用换手率回退");
+  }
+
+  if (catalysts.stock?.[snapshot.code]) {
+    score += 8;
+    reasons.push("个股催化已人工核验");
+  } else if (catalysts.industry?.[snapshot.industry]) {
+    score += 5;
+    reasons.push("行业催化已人工核验");
+  }
+
+  return {
+    score: clamp(score, 45, 95),
+    reason: reasons.join("；")
+  };
 }
 
-function evaluateCandidate(snapshot, technical, boardLookup, catalysts, config, marketDate) {
+function evaluateCandidate(snapshot, technical, boardLookup, themeLookup, catalysts, config, marketDate, preselection) {
   const fundamental = scoreFundamental(snapshot);
   const technicalScore = scoreTechnical(snapshot, technical);
   const capital = scoreCapital(snapshot);
-  const message = scoreMessage(snapshot, technical, boardLookup, catalysts);
+  const message = scoreMessage(snapshot, technical, boardLookup, themeLookup, catalysts);
   const risk = scoreRisk(snapshot, technical, config);
 
   const totalScore = clamp(
@@ -960,15 +1128,17 @@ function evaluateCandidate(snapshot, technical, boardLookup, catalysts, config, 
   );
 
   const status = buildStatus(totalScore, risk, config);
-  const confidence = buildConfidence(status, risk, catalysts, message);
+  const confidence = buildConfidence(snapshot, technical, capital, catalysts);
 
   return {
     code: snapshot.code,
     name: snapshot.name,
     industry: snapshot.industry,
+    concepts: snapshot.concepts ?? [],
     status,
     totalScore: Number(totalScore.toFixed(2)),
-    confidence,
+    confidence: Number(confidence.score.toFixed(2)),
+    confidenceReason: confidence.reason,
     scores: {
       fundamental: Number(fundamental.score.toFixed(2)),
       technical: Number(technicalScore.score.toFixed(2)),
@@ -982,18 +1152,26 @@ function evaluateCandidate(snapshot, technical, boardLookup, catalysts, config, 
     triggers: buildTriggers(snapshot, technical),
     invalidation: buildInvalidation(technical),
     nextReviewDate: addDays(`${marketDate}T00:00:00.000Z`, status === "核心机会池" ? 1 : 3),
+    preselection,
     raw: {
       snapshot,
       technical,
       boardRank: message.components.boardRank,
       boardPctChange: message.components.boardPctChange,
-      boardLeader: message.components.boardLeader
+      boardLeader: message.components.boardLeader,
+      topThemes: message.components.topThemes,
+      narrativeThemes: message.components.narrativeThemes
     }
   };
 }
 
 function compareByScore(left, right) {
-  return right.totalScore - left.totalScore || right.confidence - left.confidence || right.code.localeCompare(left.code);
+  return (
+    right.totalScore - left.totalScore ||
+    right.scores.message - left.scores.message ||
+    right.scores.technical - left.scores.technical ||
+    right.code.localeCompare(left.code)
+  );
 }
 
 function summarizePool(candidates, coreSize, watchSize) {
@@ -1016,6 +1194,7 @@ function buildReport(result) {
   lines.push(`- 观察池：${result.summary.watchCount}`);
   lines.push(`- 剔除：${result.summary.droppedCount}`);
   lines.push(`- 说明：${result.summary.note}`);
+  lines.push(`- 置信度说明：${result.meta.confidenceRule}`);
   lines.push("");
   lines.push("## 核心机会池");
   lines.push("");
@@ -1045,12 +1224,17 @@ function buildReport(result) {
     lines.push(`### ${candidate.code} ${candidate.name}`);
     lines.push("");
     lines.push(`- 结论：${candidate.status}`);
+    lines.push(`- 题材/概念：${candidate.concepts.length > 0 ? candidate.concepts.slice(0, 5).join("、") : "N/A"}`);
     lines.push(`- 为什么是现在：${candidate.whyNow}`);
     lines.push(`- 证据：${candidate.evidence.join(" ")}`);
+    lines.push(`- 证据置信度：${candidate.confidence}，${candidate.confidenceReason}`);
     lines.push(`- 主要风险：${candidate.risks.join("；")}`);
     lines.push(`- 触发条件：${candidate.triggers.join("；")}`);
     lines.push(`- 失效条件：${candidate.invalidation.join("；")}`);
     lines.push(`- 下次复核时间：${candidate.nextReviewDate}`);
+    if (candidate.preselection) {
+      lines.push(`- 初筛入围：${candidate.preselection.score}，${candidate.preselection.reasons.join("；")}`);
+    }
     lines.push("");
   }
 
@@ -1064,32 +1248,6 @@ function buildReport(result) {
   }
 
   return `${lines.join("\n")}\n`;
-}
-
-function roughScore(snapshot, boardLookup) {
-  const board = boardLookup.get(snapshot.industry) ?? { rank: 999 };
-  return (
-    scoreByThresholds(snapshot.roe, [
-      { test: (value) => value >= 20, score: 12 },
-      { test: (value) => value >= 10, score: 8 },
-      { test: (value) => value > 0, score: 4 }
-    ]) +
-    scoreByThresholds(snapshot.change60d, [
-      { test: (value) => value >= 30, score: 8 },
-      { test: (value) => value >= 15, score: 5 },
-      { test: (value) => value >= 5, score: 3 }
-    ]) +
-    scoreByThresholds(Number.isFinite(snapshot.mainNetInflow) ? ratio(snapshot.mainNetInflow, snapshot.amount) * 100 : snapshot.turnoverRate, [
-      { test: (value) => value >= 5, score: 6 },
-      { test: (value) => value >= 1, score: 4 },
-      { test: (value) => value > -1, score: 2 }
-    ]) +
-    scoreByThresholds(board.rank, [
-      { test: (value) => value <= 5, score: 5 },
-      { test: (value) => value <= 15, score: 3 },
-      { test: (value) => value <= 30, score: 1 }
-    ])
-  );
 }
 
 function candidateEligible(snapshot, config) {
@@ -1171,66 +1329,249 @@ function deriveIndustryBoards(universe) {
   );
 }
 
+function deriveThemeLookup(universe) {
+  const aggregates = new Map();
+
+  for (const snapshot of universe) {
+    for (const concept of snapshot.concepts ?? []) {
+      const current = aggregates.get(concept) ?? {
+        name: concept,
+        count: 0,
+        pctChangeSum: 0,
+        amountSum: 0,
+        leader: snapshot.name,
+        leaderPctChange: snapshot.pctChange
+      };
+
+      current.count += 1;
+      current.pctChangeSum += snapshot.pctChange;
+      current.amountSum += snapshot.amount;
+
+      if (
+        snapshot.pctChange > current.leaderPctChange ||
+        (snapshot.pctChange === current.leaderPctChange && snapshot.amount > current.amountSum / current.count)
+      ) {
+        current.leader = snapshot.name;
+        current.leaderPctChange = snapshot.pctChange;
+      }
+
+      aggregates.set(concept, current);
+    }
+  }
+
+  const rankedThemes = [...aggregates.values()]
+    .map((aggregate) => {
+      const averagePctChange = aggregate.count === 0 ? 0 : aggregate.pctChangeSum / aggregate.count;
+      const heatScore =
+        averagePctChange +
+        Math.min(aggregate.count, 5) * 0.8 +
+        Math.log10(Math.max(aggregate.amountSum, 1)) * 0.08;
+
+      return {
+        name: aggregate.name,
+        rank: 0,
+        pctChange: Number(averagePctChange.toFixed(2)),
+        count: aggregate.count,
+        heatScore,
+        leader: aggregate.leader
+      };
+    })
+    .sort((left, right) => right.heatScore - left.heatScore)
+    .map((theme, index) => ({
+      ...theme,
+      rank: index + 1
+    }));
+
+  return new Map(
+    rankedThemes.map((theme) => [
+      theme.name,
+      {
+        name: theme.name,
+        rank: theme.rank,
+        pctChange: theme.pctChange,
+        count: theme.count,
+        leader: theme.leader
+      }
+    ])
+  );
+}
+
+function buildPreselectionBreakdown(snapshot) {
+  // Preselection is intentionally simple and cheap so we can explain
+  // why thousands of names were reduced to a manageable shortlist
+  // before expensive enrichment and scoring.
+  const turnoverFit = scoreByThresholds(snapshot.turnoverRate, [
+    { test: (value) => value >= 3 && value <= 15, score: 8 },
+    { test: (value) => value >= 1, score: 5 },
+    { test: (value) => value > 0, score: 2 }
+  ]);
+
+  const liquidity = scoreByThresholds(snapshot.amount, [
+    { test: (value) => value >= 5e9, score: 8 },
+    { test: (value) => value >= 2e9, score: 6 },
+    { test: (value) => value >= 1e9, score: 4 },
+    { test: (value) => value >= 3e8, score: 2 }
+  ]);
+
+  const priceAction = scoreByThresholds(snapshot.pctChange, [
+    { test: (value) => value >= 7, score: 6 },
+    { test: (value) => value >= 3, score: 4 },
+    { test: (value) => value > 0, score: 2 }
+  ]);
+
+  const valuationFit = scoreByThresholds(snapshot.pe, [
+    { test: (value) => value > 0 && value <= 25, score: 4 },
+    { test: (value) => value > 25 && value <= 60, score: 2 },
+    { test: (value) => value > 0, score: 1 }
+  ]);
+
+  const score = turnoverFit + liquidity + priceAction + valuationFit;
+  const reasons = [
+    `换手适配 ${turnoverFit}`,
+    `流动性 ${liquidity}`,
+    `短线强度 ${priceAction}`,
+    `估值适配 ${valuationFit}`
+  ];
+
+  return {
+    score,
+    components: {
+      turnoverFit,
+      liquidity,
+      priceAction,
+      valuationFit
+    },
+    reasons
+  };
+}
+
 async function loadSampleDataset() {
   const fixture = await readJson(PATHS.sampleFixture);
   const boardLookup = buildBoardLookup(fixture.boards);
   const candidates = fixture.stocks.map((entry) => ({
-    snapshot: entry.snapshot,
-    technical: entry.technical
+    snapshot: {
+      ...entry.snapshot,
+      concepts: entry.snapshot.concepts ?? []
+    },
+    technical: entry.technical,
+    preselection: buildPreselectionBreakdown(entry.snapshot)
   }));
+  const themeLookup = deriveThemeLookup(candidates.map((entry) => entry.snapshot));
 
   return {
     marketDate: fixture.asOf,
     boardLookup,
-    candidates
+    themeLookup,
+    candidates,
+    preselection: {
+      filters: {
+        mode: "sample"
+      },
+      stats: {
+        universeCount: fixture.stocks.length,
+        eligibleCount: fixture.stocks.length,
+        shortlistedCount: fixture.stocks.length
+      },
+      model: "sample fixture preselection breakdown",
+      cutoffScore: 0,
+      shortlisted: candidates.slice(0, 10).map((entry, index) => ({
+        rank: index + 1,
+        code: entry.snapshot.code,
+        name: entry.snapshot.name,
+        score: entry.preselection.score,
+        reasons: entry.preselection.reasons
+      })),
+      nearMisses: []
+    }
   };
 }
 
 async function loadLiveDataset(config, shortlistSize) {
   const universe = await fetchSinaUniverse(config);
-  const roughSorted = universe
-    .filter((snapshot) => candidateEligible(snapshot, config))
+  const filterStats = {
+    universeCount: universe.length,
+    excludedByMinPrice: 0,
+    excludedByLiquidity: 0
+  };
+  const eligibleSnapshots = universe.filter((snapshot) => {
+    if (snapshot.price < config.filters.minPrice) {
+      filterStats.excludedByMinPrice += 1;
+      return false;
+    }
+    if (snapshot.amount < config.filters.minAmount / 2) {
+      filterStats.excludedByLiquidity += 1;
+      return false;
+    }
+    return true;
+  });
+
+  const roughSorted = eligibleSnapshots
     .map((snapshot) => ({
       snapshot,
-      rough:
-        scoreByThresholds(snapshot.turnoverRate, [
-          { test: (value) => value >= 3 && value <= 15, score: 8 },
-          { test: (value) => value >= 1, score: 5 },
-          { test: (value) => value > 0, score: 2 }
-        ]) +
-        scoreByThresholds(snapshot.amount, [
-          { test: (value) => value >= 5e9, score: 8 },
-          { test: (value) => value >= 2e9, score: 6 },
-          { test: (value) => value >= 1e9, score: 4 },
-          { test: (value) => value >= 3e8, score: 2 }
-        ]) +
-        scoreByThresholds(snapshot.pctChange, [
-          { test: (value) => value >= 7, score: 6 },
-          { test: (value) => value >= 3, score: 4 },
-          { test: (value) => value > 0, score: 2 }
-        ]) +
-        scoreByThresholds(snapshot.pe, [
-          { test: (value) => value > 0 && value <= 25, score: 4 },
-          { test: (value) => value > 25 && value <= 60, score: 2 },
-          { test: (value) => value > 0, score: 1 }
-        ])
+      preselection: buildPreselectionBreakdown(snapshot)
     }))
-    .sort((left, right) => right.rough - left.rough)
+    .sort((left, right) => right.preselection.score - left.preselection.score || right.snapshot.amount - left.snapshot.amount)
     .slice(0, shortlistSize);
 
   const enrichedCandidates = await mapLimit(
     roughSorted,
     config.live.klineConcurrency,
-    async ({ snapshot }) => enrichSinaSnapshot(snapshot)
+    async ({ snapshot, preselection }) => {
+      const enriched = await enrichSinaSnapshot(snapshot);
+      return {
+        ...enriched,
+        preselection
+      };
+    }
   );
 
   const enrichedSnapshots = enrichedCandidates.map((entry) => entry.snapshot);
   const boardLookup = deriveIndustryBoards(enrichedSnapshots);
+  const themeLookup = deriveThemeLookup(enrichedSnapshots);
+  const allPreselected = eligibleSnapshots
+    .map((snapshot) => ({
+      snapshot,
+      preselection: buildPreselectionBreakdown(snapshot)
+    }))
+    .sort((left, right) => right.preselection.score - left.preselection.score || right.snapshot.amount - left.snapshot.amount);
+  const cutoff = allPreselected[shortlistSize - 1]?.preselection.score ?? 0;
 
   return {
     marketDate: new Date().toISOString().slice(0, 10),
     boardLookup,
+    themeLookup,
     candidates: enrichedCandidates
+      .map((entry) => ({
+        ...entry,
+        preselection: entry.preselection
+      })),
+    preselection: {
+      filters: {
+        minPrice: config.filters.minPrice,
+        minAmountForUniverse: config.filters.minAmount / 2
+      },
+      stats: {
+        ...filterStats,
+        eligibleCount: eligibleSnapshots.length,
+        shortlistedCount: enrichedCandidates.length
+      },
+      model: "turnoverFit + liquidity + priceAction + valuationFit, then keep top shortlistSize for enrichment",
+      cutoffScore: cutoff,
+      shortlisted: enrichedCandidates.slice(0, 10).map((entry, index) => ({
+        rank: index + 1,
+        code: entry.snapshot.code,
+        name: entry.snapshot.name,
+        score: entry.preselection.score,
+        reasons: entry.preselection.reasons
+      })),
+      nearMisses: allPreselected.slice(shortlistSize, shortlistSize + 10).map((entry, index) => ({
+        rank: shortlistSize + index + 1,
+        code: entry.snapshot.code,
+        name: entry.snapshot.name,
+        score: entry.preselection.score,
+        reasons: entry.preselection.reasons
+      }))
+    }
   };
 }
 
@@ -1258,8 +1599,17 @@ async function runScan(options = {}) {
     dataset = await loadLiveDataset(config, shortlistSize);
   }
 
-  const evaluated = dataset.candidates.map(({ snapshot, technical }) =>
-    evaluateCandidate(snapshot, technical, dataset.boardLookup, catalysts, config, dataset.marketDate)
+  const evaluated = dataset.candidates.map(({ snapshot, technical, preselection }) =>
+    evaluateCandidate(
+      snapshot,
+      technical,
+      dataset.boardLookup,
+      dataset.themeLookup ?? new Map(),
+      catalysts,
+      config,
+      dataset.marketDate,
+      preselection
+    )
   );
 
   const pools = summarizePool(evaluated, coreSize, watchSize);
@@ -1270,7 +1620,9 @@ async function runScan(options = {}) {
       mode,
       configVersion: config.version,
       candidatesScanned: evaluated.length,
-      warnings
+      warnings,
+      confidenceRule: "confidence only measures data and evidence quality; classification only uses total score and risk deduction.",
+      preselection: dataset.preselection ?? null
     },
     summary: {
       coreCount: pools.core.length,
