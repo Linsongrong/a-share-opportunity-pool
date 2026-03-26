@@ -199,3 +199,19 @@ Caveat:
 - backtest outputs now include both gross and net results after transaction costs
 - default transaction-cost assumptions are configurable in `skills/a_share_opportunity_pool/config/scoring.json`
 - current defaults are commission `0.02%` each side with `5 RMB` minimum, transfer fee `0.001%`, and sell-side stamp duty `0.05%`
+
+Latest replay-lite snapshot (`2026-03-26`, 252 trading days):
+
+- `25` universe, core `h5`, `same_close`: gross `2.12%`, net `2.03%`
+- `100` universe, core `h5`, `same_close`: gross `2.42%`, net `2.33%`
+- `200` universe, core `h5`, `same_close`: gross `1.87%`, net `1.77%`
+- `300` universe, core `h5`, `same_close`: gross `1.67%`, net `1.57%`
+- `300` universe, core `h5`, rolling portfolio:
+  - `same_close`: gross cumulative `115.75%`, net cumulative `105.82%`
+  - `next_open`: gross cumulative `95.15%`, net cumulative `86.18%`
+
+Interpretation:
+
+- replay-lite signal quality weakens as the universe expands beyond `100`
+- even after transaction costs, the `300` universe remains positive in this replay-lite setup
+- treat this as a practical validation snapshot, not as strict PIT proof

@@ -104,3 +104,19 @@ Notes:
 - It now reports both gross and net results after transaction costs
 - Default cost model uses configurable broker commission plus transfer fee and sell-side stamp duty
 - Default cost assumptions: commission `0.02%` each side with `5 RMB` minimum, transfer fee `0.001%`, sell-side stamp duty `0.05%`
+
+Latest replay-lite snapshot (`2026-03-26`, 252 trading days):
+
+- `25` universe, core `h5`, `same_close`: gross `2.12%`, net `2.03%`
+- `100` universe, core `h5`, `same_close`: gross `2.42%`, net `2.33%`
+- `200` universe, core `h5`, `same_close`: gross `1.87%`, net `1.77%`
+- `300` universe, core `h5`, `same_close`: gross `1.67%`, net `1.57%`
+- `300` universe, core `h5`, rolling portfolio:
+  - `same_close`: gross cumulative `115.75%`, net cumulative `105.82%`
+  - `next_open`: gross cumulative `95.15%`, net cumulative `86.18%`
+
+Interpretation:
+
+- The replay-lite signal weakens as the universe expands from `100` to `300`
+- It does not collapse at `300`, but the alpha is clearly diluted
+- These figures are useful as directional evidence only; they are not strict point-in-time four-dimension backtest results
