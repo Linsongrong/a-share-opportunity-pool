@@ -2,7 +2,14 @@
 
 import { access, readFile } from "node:fs/promises";
 import process from "node:process";
-import { PATHS, enforceIndustryConcentration, ensureWorkspaceFiles, runScan } from "./a_share_opportunity_pool.mjs";
+import {
+  PATHS,
+  deriveIndustryBoards,
+  deriveThemeLookup,
+  enforceIndustryConcentration,
+  ensureWorkspaceFiles,
+  runScan
+} from "./a_share_opportunity_pool.mjs";
 
 function assert(condition, message) {
   if (!condition) {
@@ -113,6 +120,38 @@ function validateIndustryConcentrationLogic() {
   assert(keptCodes.has("000002"), "分差合理且差异化的第 2 只未被保留。");
   assert(droppedCodes.has("000003"), "同一行业第 3 只标的未被剔除。");
   assert(droppedCodes.has("000005"), "与第 1 名分差过大的第 2 只标的未被剔除。");
+}
+
+function validateLeaderTieBreak() {
+  const universe = [
+    {
+      name: "PrimaryLeader",
+      industry: "TestIndustry",
+      pctChange: 5,
+      amount: 1000,
+      concepts: ["ThemeX"]
+    },
+    {
+      name: "LowerAmountFollower",
+      industry: "TestIndustry",
+      pctChange: 5,
+      amount: 800,
+      concepts: ["ThemeX"]
+    },
+    {
+      name: "AverageBeaterOnly",
+      industry: "TestIndustry",
+      pctChange: 5,
+      amount: 900,
+      concepts: ["ThemeX"]
+    }
+  ];
+
+  const boardLookup = deriveIndustryBoards(universe);
+  const themeLookup = deriveThemeLookup(universe);
+
+  assert(boardLookup.get("TestIndustry")?.leader === "PrimaryLeader", "行业龙头在同涨幅 tie-break 下被错误替换。");
+  assert(themeLookup.get("ThemeX")?.leader === "PrimaryLeader", "题材龙头在同涨幅 tie-break 下被错误替换。");
 }
 
 async function validateHistoryTransitions() {
@@ -241,6 +280,7 @@ async function main() {
   const { live } = parseArgs(process.argv.slice(2));
   await ensureWorkspaceFiles();
   validateIndustryConcentrationLogic();
+  validateLeaderTieBreak();
   await validateSkillDoc();
   await validateHistoryTransitions();
 

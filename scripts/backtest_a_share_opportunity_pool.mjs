@@ -496,6 +496,19 @@ function scoreRiskReplay(snapshot, technical, config) {
   };
 }
 
+function buildReplayStatus(totalScore, risk, config) {
+  if (risk.veto) {
+    return "剔除";
+  }
+  if (totalScore >= config.thresholds.coreScore && risk.total <= config.thresholds.maxRiskForCore) {
+    return "核心机会池";
+  }
+  if (totalScore >= config.thresholds.watchScore) {
+    return "观察池";
+  }
+  return "剔除";
+}
+
 function buildTrendLabel(snapshot, technical) {
   const ma20Up = toNumber(technical.ma20Slope) > 0;
   const ma20AboveMa60 = technical.ma20 > technical.ma60;
@@ -612,10 +625,60 @@ async function readCachedSeries(cachePath) {
   return readJson(cachePath);
 }
 
+function localDateString(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function expectedLatestTradingDate(date = new Date()) {
+  const probe = new Date(date);
+  while (probe.getDay() === 0 || probe.getDay() === 6) {
+    probe.setDate(probe.getDate() - 1);
+  }
+  return localDateString(probe);
+}
+
+function latestBarDate(cached) {
+  return cached?.bars?.[cached.bars.length - 1]?.date ?? null;
+}
+
+function hasFallbackBarCache(cached, barsNeeded) {
+  return cached?.bars?.length >= barsNeeded;
+}
+
+function hasUsableBarCache(cached, barsNeeded, expectedLatestDate) {
+  return hasFallbackBarCache(cached, barsNeeded) && String(latestBarDate(cached)) >= expectedLatestDate;
+}
+
+function cacheRecordedDate(cached) {
+  if (!cached?.cachedAt) {
+    return null;
+  }
+
+  const parsed = new Date(cached.cachedAt);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return localDateString(parsed);
+}
+
+function hasFallbackSnapshotCache(cached) {
+  return cached?.value?.length > 0;
+}
+
+function hasUsableSnapshotCache(cached, expectedLatestDate) {
+  const recordedDate = cacheRecordedDate(cached);
+  return hasFallbackSnapshotCache(cached) && recordedDate !== null && recordedDate >= expectedLatestDate;
+}
+
 async function fetchStockBars(meta, barsNeeded, runtime) {
   const cachePath = path.join(BT_PATHS.stockCacheDir, `${meta.code}.json`);
   const cached = await readCachedSeries(cachePath);
-  if (cached?.bars?.length >= barsNeeded) {
+  const expectedLatestDate = expectedLatestTradingDate();
+  if (hasUsableBarCache(cached, barsNeeded, expectedLatestDate)) {
     runtime.providersUsed.push(`stock-cache:${meta.code}`);
     return cached.bars.slice(-barsNeeded);
   }
@@ -635,10 +698,20 @@ async function fetchStockBars(meta, barsNeeded, runtime) {
     runtime.providersUsed.push(`stock-tencent:${meta.code}`);
   } catch (error) {
     runtime.warnings.push(`stock tencent fallback for ${meta.code}: ${error.message}`);
-    bars = finalizeBars(parseEastmoneyDayBars(await fetchJson(eastmoneyUrl)), meta);
-    source = "eastmoney";
-    runtime.providersUsed.push(`stock-eastmoney:${meta.code}`);
-    runtime.fallbackEvents.push(`stock:${meta.code}:switched-to-eastmoney`);
+    try {
+      bars = finalizeBars(parseEastmoneyDayBars(await fetchJson(eastmoneyUrl)), meta);
+      source = "eastmoney";
+      runtime.providersUsed.push(`stock-eastmoney:${meta.code}`);
+      runtime.fallbackEvents.push(`stock:${meta.code}:switched-to-eastmoney`);
+    } catch (fallbackError) {
+      runtime.warnings.push(`stock eastmoney fallback for ${meta.code}: ${fallbackError.message}`);
+      if (hasFallbackBarCache(cached, barsNeeded)) {
+        runtime.providersUsed.push(`stock-cache-stale:${meta.code}`);
+        runtime.fallbackEvents.push(`stock:${meta.code}:using-stale-cache`);
+        return cached.bars.slice(-barsNeeded);
+      }
+      throw fallbackError;
+    }
   }
 
   await writeJson(cachePath, {
@@ -653,25 +726,36 @@ async function fetchStockBars(meta, barsNeeded, runtime) {
 async function fetchBenchmarkBars(symbol, barsNeeded, runtime) {
   const cachePath = path.join(BT_PATHS.benchmarkCacheDir, `${symbol}.json`);
   const cached = await readCachedSeries(cachePath);
-  if (cached?.bars?.length >= barsNeeded) {
+  const expectedLatestDate = expectedLatestTradingDate();
+  if (hasUsableBarCache(cached, barsNeeded, expectedLatestDate)) {
     runtime.providersUsed.push(`benchmark-cache:${symbol}`);
     return cached.bars.slice(-barsNeeded);
   }
 
   const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${symbol},day,,,${barsNeeded},qfq`;
-  const bars = parseTencentDayBars(await fetchJson(url), symbol);
-  if (bars.length === 0) {
-    throw new Error(`No benchmark bars returned for ${symbol}`);
+  try {
+    const bars = parseTencentDayBars(await fetchJson(url), symbol);
+    if (bars.length === 0) {
+      throw new Error(`No benchmark bars returned for ${symbol}`);
+    }
+
+    runtime.providersUsed.push(`benchmark-tencent:${symbol}`);
+    await writeJson(cachePath, {
+      cachedAt: nowIso(),
+      source: "tencent",
+      bars
+    });
+
+    return bars.slice(-barsNeeded);
+  } catch (error) {
+    runtime.warnings.push(`benchmark tencent fallback for ${symbol}: ${error.message}`);
+    if (hasFallbackBarCache(cached, barsNeeded)) {
+      runtime.providersUsed.push(`benchmark-cache-stale:${symbol}`);
+      runtime.fallbackEvents.push(`benchmark:${symbol}:using-stale-cache`);
+      return cached.bars.slice(-barsNeeded);
+    }
+    throw error;
   }
-
-  runtime.providersUsed.push(`benchmark-tencent:${symbol}`);
-  await writeJson(cachePath, {
-    cachedAt: nowIso(),
-    source: "tencent",
-    bars
-  });
-
-  return bars.slice(-barsNeeded);
 }
 
 async function ensureBacktestBootstrap() {
@@ -721,7 +805,8 @@ function normalizeEastmoneyUniverseSnapshot(row) {
 async function fetchEastmoneyUniverseForBacktest(config, runtime) {
   const cachePath = path.join(BT_PATHS.cacheDir, "eastmoney_universe.json");
   const cached = await readCachedSeries(cachePath);
-  if (cached?.value?.length > 0) {
+  const expectedLatestDate = expectedLatestTradingDate();
+  if (hasUsableSnapshotCache(cached, expectedLatestDate)) {
     runtime.providersUsed.push("backtest-universe-cache");
     return cached.value;
   }
@@ -753,6 +838,11 @@ async function fetchEastmoneyUniverseForBacktest(config, runtime) {
     return snapshots;
   } catch (error) {
     runtime.warnings.push(`backtest universe eastmoney fallback: ${error.message}`);
+    if (hasFallbackSnapshotCache(cached)) {
+      runtime.providersUsed.push("backtest-universe-cache-stale");
+      runtime.fallbackEvents.push("backtest-universe:using-stale-cache");
+      return cached.value;
+    }
     const liveUniverse = await readJson(path.join(PATHS.cacheDir, "universe", "live.json"));
     runtime.providersUsed.push("backtest-universe-live-cache");
     runtime.fallbackEvents.push("backtest-universe:switched-to-live-cache");
@@ -898,15 +988,16 @@ function buildReplayLiteCandidate(meta, bars, endIndex, config) {
   const liquidityScore = scoreLiquidityReplay(snapshot);
   const risk = scoreRiskReplay(snapshot, technical, config);
   const targetEntryRange = buildTargetEntryRange(technical);
+  const totalScore = Number(clamp(technicalScore.score + liquidityScore.score - risk.total, 0, 100).toFixed(2));
 
   return {
     code: meta.code,
     name: meta.name,
     industry: meta.industry,
     concepts: meta.concepts,
-    status: "剔除",
-    score: Number(clamp(technicalScore.score + liquidityScore.score - risk.total, 0, 100).toFixed(2)),
-    totalScore: Number(clamp(technicalScore.score + liquidityScore.score - risk.total, 0, 100).toFixed(2)),
+    status: buildReplayStatus(totalScore, risk, config),
+    score: totalScore,
+    totalScore,
     trendLabel: buildTrendLabel(snapshot, technical),
     targetEntryRange,
     entryRangeStatus: buildEntryRangeStatus(snapshot.price, targetEntryRange),
@@ -926,44 +1017,41 @@ function buildReplayLiteCandidate(meta, bars, endIndex, config) {
     raw: {
       technical,
       snapshot,
-      marketCapTier: liquidityScore.marketCapTier
+      marketCapTier: liquidityScore.marketCapTier,
+      riskVeto: risk.veto
     }
   };
 }
 
-function buildDailyPools(candidates, config) {
+function summarizeReplayPool(candidates, coreSize, watchSize) {
   const sorted = [...candidates].sort(compareReplayCandidate);
-  const coreBufferSize = Math.min(sorted.length, Math.max(config.pool.coreSize * 4, config.pool.coreSize + 8));
-  const watchBufferSize = Math.min(sorted.length, Math.max(config.pool.watchSize * 3, config.pool.watchSize + 15));
-
-  const provisional = sorted.map((candidate, index) => ({
-    ...candidate,
-    status:
-      index < coreBufferSize
-        ? "核心机会池"
-        : index < coreBufferSize + watchBufferSize
-          ? "观察池"
-          : "剔除"
-  }));
-
-  const concentrated = enforceIndustryConcentration(provisional, config);
-  const keptSorted = [...concentrated.kept].sort(compareReplayCandidate);
-  const baseCore = keptSorted.filter((candidate) => candidate.status === "核心机会池");
-  const baseWatch = keptSorted.filter((candidate) => candidate.status === "观察池");
-  const core = baseCore.slice(0, config.pool.coreSize);
-  const watch = baseWatch.slice(0, config.pool.watchSize);
+  const baseCore = sorted.filter((candidate) => candidate.status === "核心机会池");
+  const baseWatch = sorted.filter((candidate) => candidate.status === "观察池");
+  const baseDropped = sorted.filter((candidate) => candidate.status === "剔除");
+  const core = baseCore.slice(0, coreSize);
+  const watch = baseWatch.slice(0, watchSize);
   const dropped = [
-    ...concentrated.dropped,
-    ...markOverflowAsDropped(baseCore.slice(config.pool.coreSize), "overflow core bucket"),
-    ...markOverflowAsDropped(baseWatch.slice(config.pool.watchSize), "overflow watch bucket"),
-    ...provisional.filter((candidate) => candidate.status === "剔除")
+    ...baseDropped,
+    ...markOverflowAsDropped(baseCore.slice(coreSize), "overflow core bucket"),
+    ...markOverflowAsDropped(baseWatch.slice(watchSize), "overflow watch bucket")
   ].sort(compareReplayCandidate);
 
+  return { core, watch, dropped };
+}
+
+function buildDailyPools(candidates, config) {
+  const concentrated = enforceIndustryConcentration(candidates, config);
+  const summarized = summarizeReplayPool(
+    [...concentrated.kept, ...concentrated.dropped],
+    config.pool.coreSize,
+    config.pool.watchSize
+  );
+
   return {
-    core,
-    watch,
-    combined: [...core, ...watch].sort(compareReplayCandidate),
-    dropped
+    core: summarized.core,
+    watch: summarized.watch,
+    combined: [...summarized.core, ...summarized.watch].sort(compareReplayCandidate),
+    dropped: summarized.dropped
   };
 }
 

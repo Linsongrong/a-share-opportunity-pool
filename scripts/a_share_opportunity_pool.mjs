@@ -937,6 +937,14 @@ async function fetchSinaProfileSnapshot(code) {
   };
 }
 
+function buildSnapshotProfileFallback(snapshot) {
+  return {
+    industry: snapshot.industry || "未分类",
+    concepts: snapshot.concepts ?? [],
+    roe: Number.isFinite(snapshot.roe) ? snapshot.roe : NaN
+  };
+}
+
 async function fetchLiveProfileSnapshot(snapshot, config, runtime) {
   const cachePath = cachePathFor("profile", snapshot.code);
   const ttlMs = minutesToMs(config.live.cacheTtlMinutes?.profile);
@@ -950,6 +958,10 @@ async function fetchLiveProfileSnapshot(snapshot, config, runtime) {
       {
         name: "sina-profile",
         fetch: () => fetchSinaProfileSnapshot(snapshot.code)
+      },
+      {
+        name: "snapshot-profile",
+        fetch: () => buildSnapshotProfileFallback(snapshot)
       }
     ]
   });
@@ -1930,7 +1942,8 @@ function deriveIndustryBoards(universe) {
       positiveCount: 0,
       amountSum: 0,
       leader: snapshot.name,
-      leaderPctChange: snapshot.pctChange
+      leaderPctChange: snapshot.pctChange,
+      leaderAmount: snapshot.amount
     };
 
     current.count += 1;
@@ -1943,10 +1956,11 @@ function deriveIndustryBoards(universe) {
 
     if (
       snapshot.pctChange > current.leaderPctChange ||
-      (snapshot.pctChange === current.leaderPctChange && snapshot.amount > current.amountSum / current.count)
+      (snapshot.pctChange === current.leaderPctChange && snapshot.amount > current.leaderAmount)
     ) {
       current.leader = snapshot.name;
       current.leaderPctChange = snapshot.pctChange;
+      current.leaderAmount = snapshot.amount;
     }
 
     aggregates.set(key, current);
@@ -1995,7 +2009,8 @@ function deriveThemeLookup(universe) {
         pctChangeSum: 0,
         amountSum: 0,
         leader: snapshot.name,
-        leaderPctChange: snapshot.pctChange
+        leaderPctChange: snapshot.pctChange,
+        leaderAmount: snapshot.amount
       };
 
       current.count += 1;
@@ -2004,10 +2019,11 @@ function deriveThemeLookup(universe) {
 
       if (
         snapshot.pctChange > current.leaderPctChange ||
-        (snapshot.pctChange === current.leaderPctChange && snapshot.amount > current.amountSum / current.count)
+        (snapshot.pctChange === current.leaderPctChange && snapshot.amount > current.leaderAmount)
       ) {
         current.leader = snapshot.name;
         current.leaderPctChange = snapshot.pctChange;
+        current.leaderAmount = snapshot.amount;
       }
 
       aggregates.set(concept, current);
@@ -2418,4 +2434,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   });
 }
 
-export { PATHS, buildReport, enforceIndustryConcentration, ensureWorkspaceFiles, loadConfig, runInit, runScan };
+export {
+  PATHS,
+  buildReport,
+  deriveIndustryBoards,
+  deriveThemeLookup,
+  enforceIndustryConcentration,
+  ensureWorkspaceFiles,
+  loadConfig,
+  runInit,
+  runScan
+};
