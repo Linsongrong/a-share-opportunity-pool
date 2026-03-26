@@ -16,6 +16,25 @@ const BT_PATHS = {
   reportsDir: path.join(PATHS.root, "reports", "opportunity_pool", "backtest")
 };
 
+const EASTMONEY_UNIVERSE_FIELDS = [
+  "f2",
+  "f3",
+  "f5",
+  "f6",
+  "f8",
+  "f9",
+  "f12",
+  "f14",
+  "f20",
+  "f21",
+  "f23",
+  "f24",
+  "f25",
+  "f37",
+  "f62",
+  "f100"
+].join(",");
+
 function parseArgs(argv) {
   const positional = [];
   const flags = new Map();
@@ -678,10 +697,74 @@ function universeCandidateEligible(snapshot, config) {
   return snapshot.price >= config.filters.minPrice && snapshot.amount >= config.filters.minAmount / 2;
 }
 
+function normalizeEastmoneyUniverseSnapshot(row) {
+  return {
+    code: String(row.f12),
+    name: String(row.f14),
+    industry: String(row.f100 || "未分类"),
+    price: toNumber(row.f2),
+    pctChange: toNumber(row.f3),
+    amount: toNumber(row.f6),
+    turnoverRate: toNumber(row.f8),
+    pe: toNumber(row.f9),
+    marketCap: toNumber(row.f20),
+    floatCap: toNumber(row.f21),
+    pb: toNumber(row.f23),
+    change60d: toNumber(row.f24),
+    changeYtd: toNumber(row.f25),
+    roe: toNumber(row.f37),
+    mainNetInflow: toNumber(row.f62),
+    isSt: /(ST|\*ST|退)/i.test(String(row.f14))
+  };
+}
+
+async function fetchEastmoneyUniverseForBacktest(config, runtime) {
+  const cachePath = path.join(BT_PATHS.cacheDir, "eastmoney_universe.json");
+  const cached = await readCachedSeries(cachePath);
+  if (cached?.value?.length > 0) {
+    runtime.providersUsed.push("backtest-universe-cache");
+    return cached.value;
+  }
+
+  try {
+    const firstUrl =
+      `https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${config.live.pageSize}` +
+      `&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:13,m:1+t:2,m:1+t:23&fields=${EASTMONEY_UNIVERSE_FIELDS}`;
+    const firstPayload = await fetchJson(firstUrl);
+    const total = toNumber(firstPayload?.data?.total);
+    const pages = Math.ceil(total / config.live.pageSize);
+    const firstPage = firstPayload?.data?.diff ?? [];
+    const allPages = [firstPage];
+
+    for (let page = 2; page <= pages; page += 1) {
+      const url =
+        `https://push2.eastmoney.com/api/qt/clist/get?pn=${page}&pz=${config.live.pageSize}` +
+        `&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:13,m:1+t:2,m:1+t:23&fields=${EASTMONEY_UNIVERSE_FIELDS}`;
+      const payload = await fetchJson(url);
+      allPages.push(payload?.data?.diff ?? []);
+    }
+
+    const snapshots = allPages.flat().map(normalizeEastmoneyUniverseSnapshot);
+    await writeJson(cachePath, {
+      cachedAt: nowIso(),
+      value: snapshots
+    });
+    runtime.providersUsed.push("backtest-universe-eastmoney");
+    return snapshots;
+  } catch (error) {
+    runtime.warnings.push(`backtest universe eastmoney fallback: ${error.message}`);
+    const liveUniverse = await readJson(path.join(PATHS.cacheDir, "universe", "live.json"));
+    runtime.providersUsed.push("backtest-universe-live-cache");
+    runtime.fallbackEvents.push("backtest-universe:switched-to-live-cache");
+    return liveUniverse.value;
+  }
+}
+
 async function loadBacktestUniverse(config, maxUniverse) {
   await ensureBacktestBootstrap();
 
-  const universeEnvelope = await readJson(path.join(PATHS.cacheDir, "universe", "live.json"));
+  const runtime = loadBacktestUniverse.runtime;
+  const universe = await fetchEastmoneyUniverseForBacktest(config, runtime);
   const profileDir = path.join(PATHS.cacheDir, "profile");
   const profileFiles = await readdir(profileDir);
   const profileMap = new Map();
@@ -695,15 +778,22 @@ async function loadBacktestUniverse(config, maxUniverse) {
     profileMap.set(code, envelope.value);
   }
 
-  return universeEnvelope.value
-    .filter((snapshot) => profileMap.has(snapshot.code))
+  const deduped = new Map();
+  for (const snapshot of universe) {
+    const current = deduped.get(snapshot.code);
+    if (!current || snapshot.amount > current.amount) {
+      deduped.set(snapshot.code, snapshot);
+    }
+  }
+
+  return [...deduped.values()]
     .filter((snapshot) => universeCandidateEligible(snapshot, config))
     .map((snapshot) => {
       const profile = profileMap.get(snapshot.code);
       return {
         code: snapshot.code,
         name: snapshot.name,
-        industry: profile?.industry || "未分类",
+        industry: profile?.industry || snapshot.industry || "未分类",
         concepts: profile?.concepts || [],
         marketCap: snapshot.marketCap,
         floatCap: snapshot.floatCap,
@@ -739,6 +829,7 @@ async function buildHistoricalInputs(config, options) {
   const warmupDays = 80;
   const horizonMax = 5;
   const barsNeeded = options.days + warmupDays + horizonMax + 5;
+  loadBacktestUniverse.runtime = runtime;
   const universe = await loadBacktestUniverse(config, options.maxUniverse);
   const benchmarkHs300 = await fetchBenchmarkBars("sh000300", barsNeeded, runtime);
   const benchmarkZz500 = await fetchBenchmarkBars("sz399905", barsNeeded, runtime);
