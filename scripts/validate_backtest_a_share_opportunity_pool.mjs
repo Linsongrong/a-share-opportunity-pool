@@ -50,8 +50,12 @@ async function validateSmokeBacktest() {
   assert(events.some((event) => event.holdingDays === 5), "smoke backtest missing 5-day events");
   assert(events.every((event) => "excessReturn_hs300" in event), "smoke backtest missing HS300 excess return");
   assert(events.every((event) => "excessReturn_zz500" in event), "smoke backtest missing ZZ500 excess return");
+  assert(events.every((event) => "netReturn" in event), "smoke backtest missing netReturn");
+  assert(events.every((event) => "netExcessReturn_hs300" in event), "smoke backtest missing net HS300 excess return");
+  assert(events.every((event) => "totalCostRmb" in event), "smoke backtest missing totalCostRmb");
   assert("core_h1_same_close" in portfolio, "smoke backtest missing core_h1_same_close portfolio");
   assert("core_h1_next_open" in portfolio, "smoke backtest missing core_h1_next_open portfolio");
+  assert("netCumulativeReturn" in portfolio.core_h1_same_close, "smoke backtest missing net portfolio metrics");
 
   return result.metadata;
 }
@@ -69,6 +73,9 @@ async function validateFullBacktest() {
   assert(summary.metadata.universeCount > 0, "full backtest has empty universe");
   assert(Object.keys(summary.eventStudy).length > 0, "full backtest missing event summaries");
   assert(Object.keys(summary.portfolio).length > 0, "full backtest missing portfolio summaries");
+  assert(summary.metadata.transactionCosts.enabled === true, "full backtest did not enable transaction costs");
+  assert(summary.eventStudy.core_same_close_h5.averageNetReturn <= summary.eventStudy.core_same_close_h5.averageReturn, "net event return should not exceed gross return");
+  assert(summary.portfolio.core_h5_same_close.netCumulativeReturn <= summary.portfolio.core_h5_same_close.cumulativeReturn, "net portfolio return should not exceed gross return");
 
   return result.metadata;
 }

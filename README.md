@@ -101,3 +101,6 @@ Notes:
 - It evaluates both `same_close` and `next_open`
 - It evaluates `1/3/5` trading-day holding windows
 - It compares absolute returns and excess returns versus HS300 and ZZ500
+- It now reports both gross and net results after transaction costs
+- Default cost model uses configurable broker commission plus transfer fee and sell-side stamp duty
+- Default cost assumptions: commission `0.02%` each side with `5 RMB` minimum, transfer fee `0.001%`, sell-side stamp duty `0.05%`

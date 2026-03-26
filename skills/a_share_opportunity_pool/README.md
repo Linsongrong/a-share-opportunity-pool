@@ -196,3 +196,6 @@ Caveat:
 
 - replay-lite uses only historically replayable price, volume, technical, and liquidity features for selection
 - current ROE, concept, and message fields are retained as labels only and do not drive historical selection
+- backtest outputs now include both gross and net results after transaction costs
+- default transaction-cost assumptions are configurable in `skills/a_share_opportunity_pool/config/scoring.json`
+- current defaults are commission `0.02%` each side with `5 RMB` minimum, transfer fee `0.001%`, and sell-side stamp duty `0.05%`

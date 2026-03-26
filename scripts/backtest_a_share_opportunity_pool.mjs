@@ -170,6 +170,21 @@ function formatNumber(value, digits = 2) {
   return Number.isFinite(value) ? value.toFixed(digits) : "N/A";
 }
 
+function getBacktestSettings(config) {
+  const transactionCosts = config.backtest?.transactionCosts ?? {};
+  return {
+    defaultDays: config.backtest?.defaultDays ?? 252,
+    transactionCosts: {
+      enabled: transactionCosts.enabled !== false,
+      tradeNotionalRmb: toNumber(transactionCosts.tradeNotionalRmb, 100000),
+      commissionRate: toNumber(transactionCosts.commissionRate, 0.0002),
+      commissionMinimumRmb: toNumber(transactionCosts.commissionMinimumRmb, 5),
+      transferFeeRate: toNumber(transactionCosts.transferFeeRate, 0.00001),
+      stampDutySellRate: toNumber(transactionCosts.stampDutySellRate, 0.0005)
+    }
+  };
+}
+
 function mean(values) {
   if (values.length === 0) {
     return 0;
@@ -186,6 +201,35 @@ function median(values) {
   return sorted.length % 2 === 0
     ? (sorted[middle - 1] + sorted[middle]) / 2
     : sorted[middle];
+}
+
+function calculateLegCostRmb(notionalRmb, side, costConfig) {
+  const safeNotional = Math.max(0, notionalRmb);
+  if (!costConfig.enabled || safeNotional === 0) {
+    return {
+      commissionRmb: 0,
+      transferFeeRmb: 0,
+      stampDutyRmb: 0,
+      totalCostRmb: 0,
+      costRate: 0
+    };
+  }
+
+  const commissionRmb = Math.max(
+    safeNotional * costConfig.commissionRate,
+    costConfig.commissionMinimumRmb
+  );
+  const transferFeeRmb = safeNotional * costConfig.transferFeeRate;
+  const stampDutyRmb = side === "sell" ? safeNotional * costConfig.stampDutySellRate : 0;
+  const totalCostRmb = commissionRmb + transferFeeRmb + stampDutyRmb;
+
+  return {
+    commissionRmb: Number(commissionRmb.toFixed(6)),
+    transferFeeRmb: Number(transferFeeRmb.toFixed(6)),
+    stampDutyRmb: Number(stampDutyRmb.toFixed(6)),
+    totalCostRmb: Number(totalCostRmb.toFixed(6)),
+    costRate: Number((totalCostRmb / safeNotional).toFixed(8))
+  };
 }
 
 function simpleMovingAverage(values, period) {
@@ -991,7 +1035,7 @@ function buildDailySignals(inputs, config) {
   return dailySignals;
 }
 
-function createEvent(candidate, history, benchmarks, calendar, tradeDateIndex, holdingDays, entryMode, poolType) {
+function createEvent(candidate, history, benchmarks, calendar, tradeDateIndex, holdingDays, entryMode, poolType, costConfig) {
   const tradeDate = calendar[tradeDateIndex];
   const entryDateIndex = tradeDateIndex + 1;
   const exitDateIndex = tradeDateIndex + holdingDays;
@@ -1038,6 +1082,14 @@ function createEvent(candidate, history, benchmarks, calendar, tradeDateIndex, h
   }
 
   const rawReturn = ratio(exitPrice - entryPrice, entryPrice);
+  const entryNotionalRmb = costConfig.tradeNotionalRmb;
+  const shares = entryNotionalRmb / entryPrice;
+  const exitNotionalRmb = shares * exitPrice;
+  const entryCost = calculateLegCostRmb(entryNotionalRmb, "buy", costConfig);
+  const exitCost = calculateLegCostRmb(exitNotionalRmb, "sell", costConfig);
+  const netPnlRmb = exitNotionalRmb - exitCost.totalCostRmb - entryNotionalRmb - entryCost.totalCostRmb;
+  const netReturn = entryNotionalRmb > 0 ? netPnlRmb / entryNotionalRmb : 0;
+
   return {
     tradeDate,
     entryDate,
@@ -1050,10 +1102,19 @@ function createEvent(candidate, history, benchmarks, calendar, tradeDateIndex, h
     exitPrice: Number(exitPrice.toFixed(4)),
     holdingDays,
     rawReturn: Number(rawReturn.toFixed(6)),
+    netReturn: Number(netReturn.toFixed(6)),
+    entryCostRmb: entryCost.totalCostRmb,
+    exitCostRmb: exitCost.totalCostRmb,
+    totalCostRmb: Number((entryCost.totalCostRmb + exitCost.totalCostRmb).toFixed(6)),
+    totalCostRate: Number(
+      ((entryCost.totalCostRmb + exitCost.totalCostRmb) / entryNotionalRmb).toFixed(8)
+    ),
     benchmarkReturn_hs300: Number(benchmarkEvents.hs300.toFixed(6)),
     benchmarkReturn_zz500: Number(benchmarkEvents.zz500.toFixed(6)),
     excessReturn_hs300: Number((rawReturn - benchmarkEvents.hs300).toFixed(6)),
     excessReturn_zz500: Number((rawReturn - benchmarkEvents.zz500).toFixed(6)),
+    netExcessReturn_hs300: Number((netReturn - benchmarkEvents.hs300).toFixed(6)),
+    netExcessReturn_zz500: Number((netReturn - benchmarkEvents.zz500).toFixed(6)),
     score: candidate.score,
     trendLabel: candidate.trendLabel,
     targetEntryRange: candidate.targetEntryRange,
@@ -1062,7 +1123,7 @@ function createEvent(candidate, history, benchmarks, calendar, tradeDateIndex, h
   };
 }
 
-function buildEventStudy(dailySignals, inputs) {
+function buildEventStudy(dailySignals, inputs, costConfig) {
   const events = [];
   const holdingWindows = [1, 3, 5];
   const entryModes = ["same_close", "next_open"];
@@ -1084,7 +1145,17 @@ function buildEventStudy(dailySignals, inputs) {
 
         for (const entryMode of entryModes) {
           for (const holdingDays of holdingWindows) {
-            const event = createEvent(candidate, history, inputs.benchmarks, inputs.calendar, tradeDateIndex, holdingDays, entryMode, group.poolType);
+            const event = createEvent(
+              candidate,
+              history,
+              inputs.benchmarks,
+              inputs.calendar,
+              tradeDateIndex,
+              holdingDays,
+              entryMode,
+              group.poolType,
+              costConfig
+            );
             if (event) {
               events.push(event);
             }
@@ -1114,15 +1185,23 @@ function summarizeEvents(events) {
   const summary = Object.fromEntries(
     [...groups.entries()].map(([key, group]) => {
       const rawReturns = group.map((event) => event.rawReturn);
+      const netReturns = group.map((event) => event.netReturn);
       return [
         key,
         {
           count: group.length,
           averageReturn: Number(mean(rawReturns).toFixed(6)),
+          averageNetReturn: Number(mean(netReturns).toFixed(6)),
           medianReturn: Number(median(rawReturns).toFixed(6)),
+          medianNetReturn: Number(median(netReturns).toFixed(6)),
           winRate: Number(ratio(group.filter((event) => event.rawReturn > 0).length, group.length).toFixed(6)),
+          netWinRate: Number(ratio(group.filter((event) => event.netReturn > 0).length, group.length).toFixed(6)),
           averageExcessHs300: Number(mean(group.map((event) => event.excessReturn_hs300)).toFixed(6)),
-          averageExcessZz500: Number(mean(group.map((event) => event.excessReturn_zz500)).toFixed(6))
+          averageExcessZz500: Number(mean(group.map((event) => event.excessReturn_zz500)).toFixed(6)),
+          averageNetExcessHs300: Number(mean(group.map((event) => event.netExcessReturn_hs300)).toFixed(6)),
+          averageNetExcessZz500: Number(mean(group.map((event) => event.netExcessReturn_zz500)).toFixed(6)),
+          averageCostRmb: Number(mean(group.map((event) => event.totalCostRmb)).toFixed(6)),
+          averageCostRate: Number(mean(group.map((event) => event.totalCostRate)).toFixed(8))
         }
       ];
     })
@@ -1136,10 +1215,17 @@ function summarizeEvents(events) {
           summary[key] = {
             count: 0,
             averageReturn: 0,
+            averageNetReturn: 0,
             medianReturn: 0,
+            medianNetReturn: 0,
             winRate: 0,
+            netWinRate: 0,
             averageExcessHs300: 0,
-            averageExcessZz500: 0
+            averageExcessZz500: 0,
+            averageNetExcessHs300: 0,
+            averageNetExcessZz500: 0,
+            averageCostRmb: 0,
+            averageCostRate: 0
           };
         }
       }
@@ -1173,7 +1259,7 @@ function groupEventsForPortfolio(events) {
   return [...grouped.values()];
 }
 
-function buildGroupDailyReturns(group, inputs) {
+function buildGroupDailyReturns(group, inputs, costConfig) {
   const calendarIndexByDate = new Map(inputs.calendar.map((date, index) => [date, index]));
   const startIndex = calendarIndexByDate.get(group.entryDate);
   const endIndex = calendarIndexByDate.get(group.exitDate);
@@ -1184,7 +1270,8 @@ function buildGroupDailyReturns(group, inputs) {
   const series = [];
   for (let calendarIndex = startIndex; calendarIndex <= endIndex; calendarIndex += 1) {
     const date = inputs.calendar[calendarIndex];
-    const stockReturns = [];
+    const stockGrossReturns = [];
+    const stockNetReturns = [];
 
     for (const event of group.events) {
       const history = inputs.stockHistories.get(event.code);
@@ -1212,14 +1299,23 @@ function buildGroupDailyReturns(group, inputs) {
       }
 
       if (Number.isFinite(dailyReturn)) {
-        stockReturns.push(dailyReturn);
+        let netDailyReturn = dailyReturn;
+        if (date === group.entryDate) {
+          netDailyReturn -= event.entryCostRmb / costConfig.tradeNotionalRmb;
+        }
+        if (date === group.exitDate) {
+          netDailyReturn -= event.exitCostRmb / costConfig.tradeNotionalRmb;
+        }
+        stockGrossReturns.push(dailyReturn);
+        stockNetReturns.push(netDailyReturn);
       }
     }
 
-    if (stockReturns.length > 0) {
+    if (stockGrossReturns.length > 0) {
       series.push({
         date,
-        return: mean(stockReturns)
+        grossReturn: mean(stockGrossReturns),
+        netReturn: mean(stockNetReturns)
       });
     }
   }
@@ -1253,19 +1349,23 @@ function buildBenchmarkDailyReturns(inputs) {
   return results;
 }
 
-function buildPortfolioMetrics(strategyKey, groups, inputs, benchmarkDailyReturns) {
+function buildPortfolioMetrics(strategyKey, groups, inputs, benchmarkDailyReturns, costConfig) {
   const calendar = inputs.calendar.slice(1);
   const groupDailySeries = groups.map((group) => ({
     group,
-    series: buildGroupDailyReturns(group, inputs)
+    series: buildGroupDailyReturns(group, inputs, costConfig)
   }));
   const dailyRecords = [];
-  let nav = 1;
-  let peak = 1;
-  let maxDrawdown = 0;
+  let grossNav = 1;
+  let netNav = 1;
+  let grossPeak = 1;
+  let netPeak = 1;
+  let grossMaxDrawdown = 0;
+  let netMaxDrawdown = 0;
 
   for (const date of calendar) {
-    const activeReturns = [];
+    const activeGrossReturns = [];
+    const activeNetReturns = [];
     const activeStocks = new Set();
     const industryWeights = new Map();
 
@@ -1275,7 +1375,8 @@ function buildPortfolioMetrics(strategyKey, groups, inputs, benchmarkDailyReturn
         continue;
       }
 
-      activeReturns.push(dayPoint.return);
+      activeGrossReturns.push(dayPoint.grossReturn);
+      activeNetReturns.push(dayPoint.netReturn);
       const stockWeight = 1 / groupEntry.group.events.length;
       for (const event of groupEntry.group.events) {
         activeStocks.add(event.code);
@@ -1283,15 +1384,21 @@ function buildPortfolioMetrics(strategyKey, groups, inputs, benchmarkDailyReturn
       }
     }
 
-    const dailyReturn = activeReturns.length > 0 ? mean(activeReturns) : 0;
-    nav *= 1 + dailyReturn;
-    peak = Math.max(peak, nav);
-    maxDrawdown = Math.min(maxDrawdown, nav / peak - 1);
+    const grossDailyReturn = activeGrossReturns.length > 0 ? mean(activeGrossReturns) : 0;
+    const netDailyReturn = activeNetReturns.length > 0 ? mean(activeNetReturns) : 0;
+    grossNav *= 1 + grossDailyReturn;
+    netNav *= 1 + netDailyReturn;
+    grossPeak = Math.max(grossPeak, grossNav);
+    netPeak = Math.max(netPeak, netNav);
+    grossMaxDrawdown = Math.min(grossMaxDrawdown, grossNav / grossPeak - 1);
+    netMaxDrawdown = Math.min(netMaxDrawdown, netNav / netPeak - 1);
 
     dailyRecords.push({
       date,
-      return: Number(dailyReturn.toFixed(6)),
-      nav: Number(nav.toFixed(6)),
+      grossReturn: Number(grossDailyReturn.toFixed(6)),
+      netReturn: Number(netDailyReturn.toFixed(6)),
+      grossNav: Number(grossNav.toFixed(6)),
+      netNav: Number(netNav.toFixed(6)),
       holdingsCount: activeStocks.size,
       industries: Object.fromEntries(
         [...industryWeights.entries()].map(([industry, weight]) => [industry, Number(weight.toFixed(6))])
@@ -1301,8 +1408,10 @@ function buildPortfolioMetrics(strategyKey, groups, inputs, benchmarkDailyReturn
 
   const benchmarkHs300 = new Map(benchmarkDailyReturns.hs300.map((record) => [record.date, record.return]));
   const benchmarkZz500 = new Map(benchmarkDailyReturns.zz500.map((record) => [record.date, record.return]));
-  const hs300Excess = dailyRecords.map((record) => record.return - (benchmarkHs300.get(record.date) ?? 0));
-  const zz500Excess = dailyRecords.map((record) => record.return - (benchmarkZz500.get(record.date) ?? 0));
+  const grossHs300Excess = dailyRecords.map((record) => record.grossReturn - (benchmarkHs300.get(record.date) ?? 0));
+  const grossZz500Excess = dailyRecords.map((record) => record.grossReturn - (benchmarkZz500.get(record.date) ?? 0));
+  const netHs300Excess = dailyRecords.map((record) => record.netReturn - (benchmarkHs300.get(record.date) ?? 0));
+  const netZz500Excess = dailyRecords.map((record) => record.netReturn - (benchmarkZz500.get(record.date) ?? 0));
   const avgHoldingsCount = mean(dailyRecords.map((record) => record.holdingsCount));
 
   const exposureAccumulator = new Map();
@@ -1332,12 +1441,18 @@ function buildPortfolioMetrics(strategyKey, groups, inputs, benchmarkDailyReturn
 
   return {
     strategyKey,
-    cumulativeReturn: Number((nav - 1).toFixed(6)),
-    averagePeriodReturn: Number(mean(dailyRecords.map((record) => record.return)).toFixed(6)),
-    winRate: Number(ratio(dailyRecords.filter((record) => record.return > 0).length, Math.max(dailyRecords.length, 1)).toFixed(6)),
-    maxDrawdown: Number(maxDrawdown.toFixed(6)),
-    averageExcessHs300: Number(mean(hs300Excess).toFixed(6)),
-    averageExcessZz500: Number(mean(zz500Excess).toFixed(6)),
+    cumulativeReturn: Number((grossNav - 1).toFixed(6)),
+    netCumulativeReturn: Number((netNav - 1).toFixed(6)),
+    averagePeriodReturn: Number(mean(dailyRecords.map((record) => record.grossReturn)).toFixed(6)),
+    averageNetPeriodReturn: Number(mean(dailyRecords.map((record) => record.netReturn)).toFixed(6)),
+    winRate: Number(ratio(dailyRecords.filter((record) => record.grossReturn > 0).length, Math.max(dailyRecords.length, 1)).toFixed(6)),
+    netWinRate: Number(ratio(dailyRecords.filter((record) => record.netReturn > 0).length, Math.max(dailyRecords.length, 1)).toFixed(6)),
+    maxDrawdown: Number(grossMaxDrawdown.toFixed(6)),
+    netMaxDrawdown: Number(netMaxDrawdown.toFixed(6)),
+    averageExcessHs300: Number(mean(grossHs300Excess).toFixed(6)),
+    averageExcessZz500: Number(mean(grossZz500Excess).toFixed(6)),
+    averageNetExcessHs300: Number(mean(netHs300Excess).toFixed(6)),
+    averageNetExcessZz500: Number(mean(netZz500Excess).toFixed(6)),
     averageHoldingsCount: Number(avgHoldingsCount.toFixed(4)),
     turnoverFrequency: Number(mean(turnoverValues).toFixed(6)),
     industryExposure,
@@ -1345,7 +1460,7 @@ function buildPortfolioMetrics(strategyKey, groups, inputs, benchmarkDailyReturn
   };
 }
 
-function buildPortfolioStudy(events, inputs) {
+function buildPortfolioStudy(events, inputs, costConfig) {
   const groups = groupEventsForPortfolio(events);
   const benchmarkDailyReturns = buildBenchmarkDailyReturns(inputs);
   const groupedByStrategy = new Map();
@@ -1359,7 +1474,7 @@ function buildPortfolioStudy(events, inputs) {
   }
 
   for (const [strategyKey, strategyGroups] of groupedByStrategy.entries()) {
-    summary[strategyKey] = buildPortfolioMetrics(strategyKey, strategyGroups, inputs, benchmarkDailyReturns);
+    summary[strategyKey] = buildPortfolioMetrics(strategyKey, strategyGroups, inputs, benchmarkDailyReturns, costConfig);
   }
 
   for (const poolType of ["core", "watch", "combined"]) {
@@ -1367,7 +1482,7 @@ function buildPortfolioStudy(events, inputs) {
       for (const entryMode of ["same_close", "next_open"]) {
         const strategyKey = `${poolType}_h${holdingDays}_${entryMode}`;
         if (!(strategyKey in summary)) {
-          summary[strategyKey] = buildPortfolioMetrics(strategyKey, [], inputs, benchmarkDailyReturns);
+          summary[strategyKey] = buildPortfolioMetrics(strategyKey, [], inputs, benchmarkDailyReturns, costConfig);
         }
       }
     }
@@ -1385,11 +1500,17 @@ function buildBacktestSummary(result) {
         key,
         {
           cumulativeReturn: value.cumulativeReturn,
+          netCumulativeReturn: value.netCumulativeReturn,
           averagePeriodReturn: value.averagePeriodReturn,
+          averageNetPeriodReturn: value.averageNetPeriodReturn,
           winRate: value.winRate,
+          netWinRate: value.netWinRate,
           maxDrawdown: value.maxDrawdown,
+          netMaxDrawdown: value.netMaxDrawdown,
           averageExcessHs300: value.averageExcessHs300,
           averageExcessZz500: value.averageExcessZz500,
+          averageNetExcessHs300: value.averageNetExcessHs300,
+          averageNetExcessZz500: value.averageNetExcessZz500,
           averageHoldingsCount: value.averageHoldingsCount,
           turnoverFrequency: value.turnoverFrequency
         }
@@ -1409,25 +1530,28 @@ function buildBacktestReport(result) {
   lines.push(`- 交易口径：same_close 与 next_open`);
   lines.push(`- 评估窗口：1 / 3 / 5 日`);
   lines.push(`- 说明：这是 replay-lite，不是严格四维 PIT 回测。`);
+  lines.push(
+    `- 交易成本：佣金 ${formatPercent(result.metadata.transactionCosts.commissionRate)}，最低 ${result.metadata.transactionCosts.commissionMinimumRmb} RMB，过户费 ${formatPercent(result.metadata.transactionCosts.transferFeeRate)}，卖出印花税 ${formatPercent(result.metadata.transactionCosts.stampDutySellRate)}`
+  );
   lines.push("");
   lines.push("## 事件研究");
   lines.push("");
-  lines.push("| 策略 | 样本数 | 平均收益 | 中位数 | 胜率 | HS300超额 | ZZ500超额 |");
-  lines.push("| ---- | ---- | ---- | ---- | ---- | ---- | ---- |");
+  lines.push("| 策略 | 样本数 | 毛平均收益 | 净平均收益 | 毛胜率 | 净胜率 | 毛HS300超额 | 净HS300超额 |");
+  lines.push("| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |");
   for (const [key, summary] of Object.entries(result.eventStudySummary)) {
     lines.push(
-      `| ${key} | ${summary.count} | ${formatPercent(summary.averageReturn)} | ${formatPercent(summary.medianReturn)} | ${formatPercent(summary.winRate)} | ${formatPercent(summary.averageExcessHs300)} | ${formatPercent(summary.averageExcessZz500)} |`
+      `| ${key} | ${summary.count} | ${formatPercent(summary.averageReturn)} | ${formatPercent(summary.averageNetReturn)} | ${formatPercent(summary.winRate)} | ${formatPercent(summary.netWinRate)} | ${formatPercent(summary.averageExcessHs300)} | ${formatPercent(summary.averageNetExcessHs300)} |`
     );
   }
 
   lines.push("");
   lines.push("## 滚动组合");
   lines.push("");
-  lines.push("| 策略 | 累计收益 | 胜率 | 最大回撤 | HS300超额 | ZZ500超额 | 日均持仓 | 换手频率 |");
+  lines.push("| 策略 | 毛累计收益 | 净累计收益 | 毛最大回撤 | 净最大回撤 | 毛HS300超额 | 净HS300超额 | 日均持仓 |");
   lines.push("| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |");
   for (const [key, summary] of Object.entries(result.portfolio)) {
     lines.push(
-      `| ${key} | ${formatPercent(summary.cumulativeReturn)} | ${formatPercent(summary.winRate)} | ${formatPercent(summary.maxDrawdown)} | ${formatPercent(summary.averageExcessHs300)} | ${formatPercent(summary.averageExcessZz500)} | ${formatNumber(summary.averageHoldingsCount, 2)} | ${formatPercent(summary.turnoverFrequency)} |`
+      `| ${key} | ${formatPercent(summary.cumulativeReturn)} | ${formatPercent(summary.netCumulativeReturn)} | ${formatPercent(summary.maxDrawdown)} | ${formatPercent(summary.netMaxDrawdown)} | ${formatPercent(summary.averageExcessHs300)} | ${formatPercent(summary.averageNetExcessHs300)} | ${formatNumber(summary.averageHoldingsCount, 2)} |`
     );
   }
 
@@ -1453,12 +1577,13 @@ async function writeBacktestOutputs(result) {
 async function runBacktest(options = {}) {
   await ensureBacktestDirs();
   const config = await loadConfig();
-  const days = toNumber(options.days, 252);
+  const backtestSettings = getBacktestSettings(config);
+  const days = toNumber(options.days, backtestSettings.defaultDays);
   const maxUniverse = toNumber(options.maxUniverse, config.pool.shortlistSize);
   const inputs = await buildHistoricalInputs(config, { days, maxUniverse });
   const dailySignals = buildDailySignals(inputs, config);
-  const events = buildEventStudy(dailySignals, inputs);
-  const portfolio = buildPortfolioStudy(events, inputs);
+  const events = buildEventStudy(dailySignals, inputs, backtestSettings.transactionCosts);
+  const portfolio = buildPortfolioStudy(events, inputs, backtestSettings.transactionCosts);
 
   const result = {
     metadata: {
@@ -1470,6 +1595,7 @@ async function runBacktest(options = {}) {
       providersUsed: [...new Set(inputs.runtime.providersUsed)],
       fallbackEvents: [...new Set(inputs.runtime.fallbackEvents)],
       warnings: [...new Set(inputs.runtime.warnings)],
+      transactionCosts: backtestSettings.transactionCosts,
       assumptions: {
         poolScope: "core primary; watch and combined as supplementary outputs",
         entryModes: ["same_close", "next_open"],

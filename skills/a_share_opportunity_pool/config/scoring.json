@@ -43,5 +43,16 @@
     "overheatPenalty": 5,
     "weakTrendPenalty": 3,
     "newListingPenalty": 6
+  },
+  "backtest": {
+    "defaultDays": 252,
+    "transactionCosts": {
+      "enabled": true,
+      "tradeNotionalRmb": 100000,
+      "commissionRate": 0.0002,
+      "commissionMinimumRmb": 5,
+      "transferFeeRate": 0.00001,
+      "stampDutySellRate": 0.0005
+    }
   }
 }
