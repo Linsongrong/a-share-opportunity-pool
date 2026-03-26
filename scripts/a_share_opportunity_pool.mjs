@@ -18,7 +18,8 @@ const PATHS = {
   outputJson: path.join(ROOT, "data", "opportunity_pool", "latest.json"),
   reportsDir: path.join(ROOT, "reports", "opportunity_pool"),
   cacheDir: path.join(ROOT, "data", "opportunity_pool", "cache"),
-  stateDir: path.join(ROOT, "data", "opportunity_pool", "state")
+  stateDir: path.join(ROOT, "data", "opportunity_pool", "state"),
+  archiveLiveDir: path.join(ROOT, "data", "opportunity_pool", "archive", "live")
 };
 
 const A_SHARE_FIELDS = [
@@ -310,6 +311,7 @@ async function ensureWorkspaceFiles() {
   await mkdir(PATHS.reportsDir, { recursive: true });
   await mkdir(PATHS.cacheDir, { recursive: true });
   await mkdir(PATHS.stateDir, { recursive: true });
+  await mkdir(PATHS.archiveLiveDir, { recursive: true });
   await ensureJsonFile(PATHS.catalystOverrides, { stock: {}, industry: {} });
 }
 
@@ -2234,6 +2236,16 @@ function latestReportPath(marketDate) {
   return path.join(PATHS.reportsDir, `${marketDate}.md`);
 }
 
+async function archiveLiveSnapshot(result) {
+  const archivePath = path.join(PATHS.archiveLiveDir, `${result.meta.marketDate}.json`);
+  if (await exists(archivePath)) {
+    return archivePath;
+  }
+
+  await writeJson(archivePath, result);
+  return archivePath;
+}
+
 async function runScan(options = {}) {
   await ensureWorkspaceFiles();
   const config = await loadConfig();
@@ -2326,6 +2338,10 @@ async function runScan(options = {}) {
   const reportPath = latestReportPath(dataset.marketDate);
   await writeJson(outputPath, result);
   await writeText(reportPath, buildReport(result));
+
+  if (mode === "live") {
+    await archiveLiveSnapshot(result);
+  }
 
   return { result, outputPath, reportPath };
 }

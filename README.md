@@ -72,3 +72,32 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode live
 - `live` 实盘数据闭环验证
 
 默认 live 模式下，当前实现会基于公开可访问的数据源做候选筛选和打分；在没有额外付费数据接入时，部分字段会诚实标记为 `N/A`，不会伪造。
+## Backtest
+
+Replay-lite backtest is available now.
+
+Run:
+
+```powershell
+node .\scripts\backtest_a_share_opportunity_pool.mjs run
+```
+
+Validate:
+
+```powershell
+node .\scripts\validate_backtest_a_share_opportunity_pool.mjs
+```
+
+Outputs:
+
+- `data/opportunity_pool/backtest/summary.json`
+- `data/opportunity_pool/backtest/events.json`
+- `data/opportunity_pool/backtest/portfolio.json`
+- `reports/opportunity_pool/backtest/YYYY-MM-DD-backtest.md`
+
+Notes:
+
+- This is `replay-lite`, not strict point-in-time four-dimension backtesting
+- It evaluates both `same_close` and `next_open`
+- It evaluates `1/3/5` trading-day holding windows
+- It compares absolute returns and excess returns versus HS300 and ZZ500

@@ -171,3 +171,28 @@ JSON 里会包含：
 - live 模式会优先用缓存降低新浪被 `456` 限流的概率
 
 如果你后续愿意接入更强的数据源，这套脚本可以继续往里扩。
+## Backtest
+
+You can now run a replay-lite backtest:
+
+```powershell
+node .\scripts\backtest_a_share_opportunity_pool.mjs run
+```
+
+And validate it with:
+
+```powershell
+node .\scripts\validate_backtest_a_share_opportunity_pool.mjs
+```
+
+Default outputs:
+
+- `data/opportunity_pool/backtest/summary.json`
+- `data/opportunity_pool/backtest/events.json`
+- `data/opportunity_pool/backtest/portfolio.json`
+- `reports/opportunity_pool/backtest/YYYY-MM-DD-backtest.md`
+
+Caveat:
+
+- replay-lite uses only historically replayable price, volume, technical, and liquidity features for selection
+- current ROE, concept, and message fields are retained as labels only and do not drive historical selection
