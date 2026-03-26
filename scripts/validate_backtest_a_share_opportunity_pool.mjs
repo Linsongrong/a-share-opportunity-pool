@@ -3,7 +3,7 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { BT_PATHS, runBacktest } from "./backtest_a_share_opportunity_pool.mjs";
-import { PATHS, runScan } from "./a_share_opportunity_pool.mjs";
+import { PATHS, loadConfig, runScan } from "./a_share_opportunity_pool.mjs";
 
 function assert(condition, message) {
   if (!condition) {
@@ -24,7 +24,28 @@ async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, "utf8"));
 }
 
+function assertReplayPoolRules(result, config, label) {
+  for (const signal of result.dailySignals) {
+    assert(
+      signal.core.every(
+        (candidate) =>
+          candidate.totalScore >= config.thresholds.coreScore &&
+          candidate.scores.riskDeduction <= config.thresholds.maxRiskForCore &&
+          candidate.raw?.riskVeto !== true
+      ),
+      `${label} 核心池包含不满足 core 阈值或 veto 规则的标的。`
+    );
+    assert(
+      signal.watch.every(
+        (candidate) => candidate.totalScore >= config.thresholds.watchScore && candidate.raw?.riskVeto !== true
+      ),
+      `${label} 观察池包含不满足 watch 阈值或 veto 规则的标的。`
+    );
+  }
+}
+
 async function validateSmokeBacktest() {
+  const config = await loadConfig();
   const result = await runBacktest({
     days: 20,
     maxUniverse: 15
@@ -56,11 +77,13 @@ async function validateSmokeBacktest() {
   assert("core_h1_same_close" in portfolio, "smoke backtest missing core_h1_same_close portfolio");
   assert("core_h1_next_open" in portfolio, "smoke backtest missing core_h1_next_open portfolio");
   assert("netCumulativeReturn" in portfolio.core_h1_same_close, "smoke backtest missing net portfolio metrics");
+  assertReplayPoolRules(result, config, "smoke backtest");
 
   return result.metadata;
 }
 
 async function validateFullBacktest() {
+  const config = await loadConfig();
   const result = await runBacktest({
     days: 252,
     maxUniverse: 25
@@ -76,6 +99,7 @@ async function validateFullBacktest() {
   assert(summary.metadata.transactionCosts.enabled === true, "full backtest did not enable transaction costs");
   assert(summary.eventStudy.core_same_close_h5.averageNetReturn <= summary.eventStudy.core_same_close_h5.averageReturn, "net event return should not exceed gross return");
   assert(summary.portfolio.core_h5_same_close.netCumulativeReturn <= summary.portfolio.core_h5_same_close.cumulativeReturn, "net portfolio return should not exceed gross return");
+  assertReplayPoolRules(result, config, "full backtest");
 
   return result.metadata;
 }
