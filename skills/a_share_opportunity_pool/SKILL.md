@@ -22,7 +22,7 @@ metadata:
 4. 如果用户要求“更重视消息面”或“补充公告验证”，先用 web 搜索和官方披露核验，再把核验结果写回 `data/opportunity_pool/catalyst_overrides.json`，最后重跑脚本。
 5. 读取结果时要同时看 `industry` 和 `concepts`，不要只用行业标签解释涨跌逻辑。
 6. 不得把北向或两融缺失当作利空；在零依赖 live 模式下这两项默认是 `N/A`。
-7. 如果 `meta.providersUsed` 或 `meta.fallbackEvents` 显示已经进入降级模式，回答用户时要明确说明当前结果是否使用了缓存或备用 provider。
+7. 如果 `meta.dataQuality.level` 是 `degraded`，或 `meta.providersUsed` / `meta.fallbackEvents` 显示已经进入降级模式，回答用户时要明确说明当前结果是否使用了缓存、stale cache 或备用 provider。
 8. 回答用户时要优先引用 `previousScore`、`scoreChange`、`trendLabel`、`targetEntryRange` 和 `entryRangeStatus`，不要只给静态总分。
 
 ## 推荐执行顺序
@@ -34,6 +34,8 @@ metadata:
 ```powershell
 node .\scripts\validate_a_share_opportunity_pool.mjs
 ```
+
+这一步只用于自检；validation 产物会写到隔离目录，不会覆盖正式 `latest.json` 或正式日报。
 
 如果用户明确要求验证 live 能力，再执行：
 
@@ -55,13 +57,18 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode live
 node .\scripts\a_share_opportunity_pool.mjs scan --mode sample
 ```
 
+`scan --mode sample` 默认写入 validation 隔离目录，不会覆盖正式 `latest.json`。
+
 ### 3. 读取产物
 
 重点读取：
 
-- `data/opportunity_pool/latest.json`
-- `reports/opportunity_pool/*.md` 中最新的一份
+- live publish：读取 `data/opportunity_pool/latest.json` 与 `reports/opportunity_pool/*.md` 中最新的一份
+- sample / validation：优先读取命令返回的 `outputPath` 与 `reportPath`
 - `meta.preselection`
+- `meta.dataQuality`
+- `meta.dataFreshness`
+- `meta.fallbackSummary`
 - `meta.providersUsed`
 - `meta.fallbackEvents`
 
@@ -111,3 +118,4 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode live
 - 不允许重复累计 KDJ、MACD、RSI 这类高度相关信号
 - 不允许把传闻、小作文、匿名消息当成正式催化
 - 不允许把缺失值记成 0 分
+- 如果引用 replay-lite 回放结果，不允许把它表述成“live 四维总分策略已被历史严格验证”

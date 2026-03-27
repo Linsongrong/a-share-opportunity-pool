@@ -25,9 +25,16 @@
 
 ## 快速开始
 
+初始化或自检：
+
 ```powershell
 node .\scripts\validate_a_share_opportunity_pool.mjs
 ```
+
+这会把验证产物写到隔离目录，不会覆盖正式发布结果：
+
+- `data/opportunity_pool/validation/<run-id>/latest.json`
+- `reports/opportunity_pool/validation/<run-id>/<market-date>.md`
 
 验证 live 模式：
 
@@ -35,16 +42,22 @@ node .\scripts\validate_a_share_opportunity_pool.mjs
 node .\scripts\validate_a_share_opportunity_pool.mjs --live
 ```
 
-直接运行机会池扫描：
+正式刷新机会池：
 
 ```powershell
 node .\scripts\a_share_opportunity_pool.mjs scan --mode live
 ```
 
+正式发布结果只来自 `scan --mode live`。
+
 ## 输出文件
 
-- `data/opportunity_pool/latest.json`
-- `reports/opportunity_pool/YYYY-MM-DD.md`
+- 正式发布：
+  - `data/opportunity_pool/latest.json`
+  - `reports/opportunity_pool/YYYY-MM-DD.md`
+- validation 自检：
+  - `data/opportunity_pool/validation/<run-id>/latest.json`
+  - `reports/opportunity_pool/validation/<run-id>/<market-date>.md`
 
 ## 消息面增强
 
@@ -72,6 +85,14 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode live
 - `live` 实盘数据闭环验证
 
 默认 live 模式下，当前实现会基于公开可访问的数据源做候选筛选和打分；在没有额外付费数据接入时，部分字段会诚实标记为 `N/A`，不会伪造。
+
+live 结果现在会额外输出：
+
+- `meta.dataQuality`
+- `meta.dataFreshness`
+- `meta.fallbackSummary`
+
+如果存在抓取告警、备用 provider 或 stale cache，报告头部会明确标记为 `degraded`。
 ## Backtest
 
 Replay-lite backtest is available now.
@@ -98,12 +119,15 @@ Outputs:
 Notes:
 
 - This is `replay-lite`, not strict point-in-time four-dimension backtesting
-- It evaluates both `same_close` and `next_open`
+- `next_open` is the primary execution view
+- `same_close` is kept only as an optimistic reference
 - It evaluates `1/3/5` trading-day holding windows
 - It compares absolute returns and excess returns versus HS300 and ZZ500
 - It now reports both gross and net results after transaction costs
 - Default cost model uses configurable broker commission plus transfer fee and sell-side stamp duty
 - Default cost assumptions: commission `0.02%` each side with `5 RMB` minimum, transfer fee `0.001%`, sell-side stamp duty `0.05%`
+- Replay-lite validates historically replayable technical/liquidity/risk signals only
+- Current ROE, concept, and message fields remain labels and do not prove the live four-dimension total-score model
 
 Latest replay-lite snapshot (`2026-03-26`, 252 trading days):
 
@@ -112,11 +136,11 @@ Latest replay-lite snapshot (`2026-03-26`, 252 trading days):
 - `200` universe, core `h5`, `same_close`: gross `1.87%`, net `1.77%`
 - `300` universe, core `h5`, `same_close`: gross `1.67%`, net `1.57%`
 - `300` universe, core `h5`, rolling portfolio:
-  - `same_close`: gross cumulative `115.75%`, net cumulative `105.82%`
   - `next_open`: gross cumulative `95.15%`, net cumulative `86.18%`
+  - `same_close`: gross cumulative `115.75%`, net cumulative `105.82%`
 
 Interpretation:
 
 - The replay-lite signal weakens as the universe expands from `100` to `300`
-- It does not collapse at `300`, but the alpha is clearly diluted
-- These figures are useful as directional evidence only; they are not strict point-in-time four-dimension backtest results
+- Even when it stays positive, it should be read as directional evidence only
+- These figures do not prove that the live four-dimension total-score strategy has been historically validated

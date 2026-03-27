@@ -4,7 +4,14 @@ import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { PATHS, ensureWorkspaceFiles, loadConfig, runScan, enforceIndustryConcentration } from "./a_share_opportunity_pool.mjs";
+import {
+  PATHS,
+  currentMarketDate,
+  ensureWorkspaceFiles,
+  loadConfig,
+  runScan,
+  enforceIndustryConcentration
+} from "./a_share_opportunity_pool.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -34,6 +41,17 @@ const EASTMONEY_UNIVERSE_FIELDS = [
   "f62",
   "f100"
 ].join(",");
+
+const ENTRY_MODE_ORDER = new Map([
+  ["next_open", 0],
+  ["same_close", 1]
+]);
+
+const POOL_TYPE_ORDER = new Map([
+  ["core", 0],
+  ["watch", 1],
+  ["combined", 2]
+]);
 
 function parseArgs(argv) {
   const positional = [];
@@ -1214,7 +1232,7 @@ function createEvent(candidate, history, benchmarks, calendar, tradeDateIndex, h
 function buildEventStudy(dailySignals, inputs, costConfig) {
   const events = [];
   const holdingWindows = [1, 3, 5];
-  const entryModes = ["same_close", "next_open"];
+  const entryModes = ["next_open", "same_close"];
 
   for (let tradeDateIndex = 0; tradeDateIndex < inputs.calendar.length - 5; tradeDateIndex += 1) {
     const signal = dailySignals[tradeDateIndex];
@@ -1253,13 +1271,73 @@ function buildEventStudy(dailySignals, inputs, costConfig) {
     }
   }
 
-  return events;
+  return events.sort(compareEventOrder);
+}
+
+function parseEventStrategyKey(key) {
+  const match = key.match(/^([^_]+)_(same_close|next_open)_h(\d+)$/);
+  return {
+    poolType: match?.[1] ?? "unknown",
+    entryMode: match?.[2] ?? "unknown",
+    holdingDays: toNumber(match?.[3], Number.POSITIVE_INFINITY)
+  };
+}
+
+function parsePortfolioStrategyKey(key) {
+  const match = key.match(/^([^_]+)_h(\d+)_(same_close|next_open)$/);
+  return {
+    poolType: match?.[1] ?? "unknown",
+    holdingDays: toNumber(match?.[2], Number.POSITIVE_INFINITY),
+    entryMode: match?.[3] ?? "unknown"
+  };
+}
+
+function compareEventOrder(left, right) {
+  return (
+    (ENTRY_MODE_ORDER.get(left.entryMode) ?? Number.POSITIVE_INFINITY) -
+      (ENTRY_MODE_ORDER.get(right.entryMode) ?? Number.POSITIVE_INFINITY) ||
+    (POOL_TYPE_ORDER.get(left.poolType) ?? Number.POSITIVE_INFINITY) -
+      (POOL_TYPE_ORDER.get(right.poolType) ?? Number.POSITIVE_INFINITY) ||
+    left.holdingDays - right.holdingDays ||
+    String(left.tradeDate).localeCompare(String(right.tradeDate)) ||
+    String(left.code).localeCompare(String(right.code))
+  );
+}
+
+function compareStrategyParts(left, right) {
+  return (
+    (ENTRY_MODE_ORDER.get(left.entryMode) ?? Number.POSITIVE_INFINITY) -
+      (ENTRY_MODE_ORDER.get(right.entryMode) ?? Number.POSITIVE_INFINITY) ||
+    (POOL_TYPE_ORDER.get(left.poolType) ?? Number.POSITIVE_INFINITY) -
+      (POOL_TYPE_ORDER.get(right.poolType) ?? Number.POSITIVE_INFINITY) ||
+    left.holdingDays - right.holdingDays
+  );
+}
+
+function orderEventSummaryObject(summary) {
+  return Object.fromEntries(
+    Object.entries(summary).sort(
+      ([leftKey], [rightKey]) =>
+        compareStrategyParts(parseEventStrategyKey(leftKey), parseEventStrategyKey(rightKey)) ||
+        leftKey.localeCompare(rightKey)
+    )
+  );
+}
+
+function orderPortfolioSummaryObject(summary) {
+  return Object.fromEntries(
+    Object.entries(summary).sort(
+      ([leftKey], [rightKey]) =>
+        compareStrategyParts(parsePortfolioStrategyKey(leftKey), parsePortfolioStrategyKey(rightKey)) ||
+        leftKey.localeCompare(rightKey)
+    )
+  );
 }
 
 function summarizeEvents(events) {
   const groups = new Map();
   const poolTypes = ["core", "watch", "combined"];
-  const entryModes = ["same_close", "next_open"];
+  const entryModes = ["next_open", "same_close"];
   const holdingWindows = [1, 3, 5];
 
   for (const event of events) {
@@ -1320,7 +1398,7 @@ function summarizeEvents(events) {
     }
   }
 
-  return summary;
+  return orderEventSummaryObject(summary);
 }
 
 function groupEventsForPortfolio(events) {
@@ -1567,7 +1645,7 @@ function buildPortfolioStudy(events, inputs, costConfig) {
 
   for (const poolType of ["core", "watch", "combined"]) {
     for (const holdingDays of [1, 3, 5]) {
-      for (const entryMode of ["same_close", "next_open"]) {
+      for (const entryMode of ["next_open", "same_close"]) {
         const strategyKey = `${poolType}_h${holdingDays}_${entryMode}`;
         if (!(strategyKey in summary)) {
           summary[strategyKey] = buildPortfolioMetrics(strategyKey, [], inputs, benchmarkDailyReturns, costConfig);
@@ -1576,15 +1654,15 @@ function buildPortfolioStudy(events, inputs, costConfig) {
     }
   }
 
-  return summary;
+  return orderPortfolioSummaryObject(summary);
 }
 
 function buildBacktestSummary(result) {
   return {
     metadata: result.metadata,
-    eventStudy: result.eventStudySummary,
+    eventStudy: orderEventSummaryObject(result.eventStudySummary),
     portfolio: Object.fromEntries(
-      Object.entries(result.portfolio).map(([key, value]) => [
+      Object.entries(orderPortfolioSummaryObject(result.portfolio)).map(([key, value]) => [
         key,
         {
           cumulativeReturn: value.cumulativeReturn,
@@ -1609,24 +1687,32 @@ function buildBacktestSummary(result) {
 
 function buildBacktestReport(result) {
   const lines = [];
-  lines.push("# A股机会池回测报告");
+  lines.push("# A股机会池 replay-lite 回放报告（非 live 四维策略验证）");
   lines.push("");
   lines.push(`- 运行时间：${result.metadata.generatedAt}`);
   lines.push(`- 回测口径：${result.metadata.mode}`);
   lines.push(`- 时间范围：最近 ${result.metadata.days} 个交易日`);
   lines.push(`- 宇宙规模：${result.metadata.universeCount}`);
-  lines.push(`- 交易口径：same_close 与 next_open`);
+  lines.push(`- 默认参考口径：${result.metadata.primaryExecutionView}`);
+  lines.push(`- 交易口径：next_open 为主，same_close 仅作乐观参考`);
   lines.push(`- 评估窗口：1 / 3 / 5 日`);
-  lines.push(`- 说明：这是 replay-lite，不是严格四维 PIT 回测。`);
+  lines.push(`- 说明：这是 replay-lite，不是严格四维 PIT 回测，也不能直接证明 live 总分模型已被历史严格验证。`);
+  lines.push(
+    `- 回放信号：${result.metadata.replayScope.selectionSignals.join(" / ")}；标签字段：${result.metadata.replayScope.labelOnlyFields.join(" / ")}`
+  );
   lines.push(
     `- 交易成本：佣金 ${formatPercent(result.metadata.transactionCosts.commissionRate)}，最低 ${result.metadata.transactionCosts.commissionMinimumRmb} RMB，过户费 ${formatPercent(result.metadata.transactionCosts.transferFeeRate)}，卖出印花税 ${formatPercent(result.metadata.transactionCosts.stampDutySellRate)}`
   );
+  lines.push("");
+  lines.push("> `next_open` 是默认参考口径。");
+  lines.push("> `same_close` 仅作乐观参考，不作为主结论。");
+  lines.push("> replay-lite 只验证可回放的技术、流动性和风险信号，不等于 live 四维总分策略验证。");
   lines.push("");
   lines.push("## 事件研究");
   lines.push("");
   lines.push("| 策略 | 样本数 | 毛平均收益 | 净平均收益 | 毛胜率 | 净胜率 | 毛HS300超额 | 净HS300超额 |");
   lines.push("| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |");
-  for (const [key, summary] of Object.entries(result.eventStudySummary)) {
+  for (const [key, summary] of Object.entries(orderEventSummaryObject(result.eventStudySummary))) {
     lines.push(
       `| ${key} | ${summary.count} | ${formatPercent(summary.averageReturn)} | ${formatPercent(summary.averageNetReturn)} | ${formatPercent(summary.winRate)} | ${formatPercent(summary.netWinRate)} | ${formatPercent(summary.averageExcessHs300)} | ${formatPercent(summary.averageNetExcessHs300)} |`
     );
@@ -1637,7 +1723,7 @@ function buildBacktestReport(result) {
   lines.push("");
   lines.push("| 策略 | 毛累计收益 | 净累计收益 | 毛最大回撤 | 净最大回撤 | 毛HS300超额 | 净HS300超额 | 日均持仓 |");
   lines.push("| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |");
-  for (const [key, summary] of Object.entries(result.portfolio)) {
+  for (const [key, summary] of Object.entries(orderPortfolioSummaryObject(result.portfolio))) {
     lines.push(
       `| ${key} | ${formatPercent(summary.cumulativeReturn)} | ${formatPercent(summary.netCumulativeReturn)} | ${formatPercent(summary.maxDrawdown)} | ${formatPercent(summary.netMaxDrawdown)} | ${formatPercent(summary.averageExcessHs300)} | ${formatPercent(summary.averageNetExcessHs300)} | ${formatNumber(summary.averageHoldingsCount, 2)} |`
     );
@@ -1657,7 +1743,7 @@ async function writeBacktestOutputs(result) {
   await writeJson(path.join(BT_PATHS.dataDir, "events.json"), result.events);
   await writeJson(path.join(BT_PATHS.dataDir, "portfolio.json"), result.portfolio);
   await writeText(
-    path.join(BT_PATHS.reportsDir, `${new Date().toISOString().slice(0, 10)}-backtest.md`),
+    path.join(BT_PATHS.reportsDir, `${currentMarketDate()}-backtest.md`),
     buildBacktestReport(result)
   );
 }
@@ -1680,13 +1766,24 @@ async function runBacktest(options = {}) {
       days,
       maxUniverse,
       universeCount: inputs.universe.length,
+      primaryExecutionView: "next_open",
+      executionViews: {
+        next_open: "primary",
+        same_close: "optimistic_reference"
+      },
+      replayScope: {
+        selectionSignals: ["technical", "liquidity", "risk"],
+        labelOnlyFields: ["fundamental", "message", "ROE", "concepts"],
+        comparableToLiveTotalScore: false,
+        reason: "live total score includes non-PIT dimensions not used in replay-lite selection"
+      },
       providersUsed: [...new Set(inputs.runtime.providersUsed)],
       fallbackEvents: [...new Set(inputs.runtime.fallbackEvents)],
       warnings: [...new Set(inputs.runtime.warnings)],
       transactionCosts: backtestSettings.transactionCosts,
       assumptions: {
         poolScope: "core primary; watch and combined as supplementary outputs",
-        entryModes: ["same_close", "next_open"],
+        entryModes: ["next_open", "same_close"],
         holdingWindows: [1, 3, 5],
         benchmarkSymbols: {
           hs300: "sh000300",

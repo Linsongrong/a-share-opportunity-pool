@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
+const MARKET_TIME_ZONE = "Asia/Shanghai";
 
 const PATHS = {
   root: ROOT,
@@ -16,9 +17,12 @@ const PATHS = {
   catalystOverrides: path.join(ROOT, "data", "opportunity_pool", "catalyst_overrides.json"),
   sampleFixture: path.join(ROOT, "data", "opportunity_pool", "fixtures", "sample_market_snapshot.json"),
   outputJson: path.join(ROOT, "data", "opportunity_pool", "latest.json"),
+  validationDataDir: path.join(ROOT, "data", "opportunity_pool", "validation"),
   reportsDir: path.join(ROOT, "reports", "opportunity_pool"),
+  validationReportsDir: path.join(ROOT, "reports", "opportunity_pool", "validation"),
   cacheDir: path.join(ROOT, "data", "opportunity_pool", "cache"),
   stateDir: path.join(ROOT, "data", "opportunity_pool", "state"),
+  validationStateDir: path.join(ROOT, "data", "opportunity_pool", "state", "validation"),
   archiveLiveDir: path.join(ROOT, "data", "opportunity_pool", "archive", "live")
 };
 
@@ -138,15 +142,41 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function formatDateInTimeZone(date = new Date(), timeZone = MARKET_TIME_ZONE) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value ?? "0000";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
+}
+
+function currentMarketDate() {
+  return formatDateInTimeZone(new Date(), MARKET_TIME_ZONE);
+}
+
 function minutesToMs(minutes) {
   return Math.max(0, toNumber(minutes)) * 60 * 1000;
+}
+
+function ageMsToMinutes(ageMs) {
+  if (!Number.isFinite(ageMs)) {
+    return null;
+  }
+  return Number((Math.max(0, ageMs) / (60 * 1000)).toFixed(2));
 }
 
 function createRuntime() {
   return {
     warnings: [],
     providersUsed: [],
-    fallbackEvents: []
+    fallbackEvents: [],
+    resolutions: [],
+    infoMessages: []
   };
 }
 
@@ -176,6 +206,33 @@ function recordFallback(runtime, fallback) {
     return;
   }
   pushUnique(runtime.fallbackEvents, fallback);
+}
+
+function recordInfo(runtime, message) {
+  if (!runtime || !message) {
+    return;
+  }
+  pushUnique(runtime.infoMessages, message);
+}
+
+function resolutionKindFromLabel(label) {
+  return String(label ?? "").split(":", 1)[0] || "unknown";
+}
+
+function recordResolution(runtime, label, resolution) {
+  if (!runtime || !resolution) {
+    return;
+  }
+
+  runtime.resolutions.push({
+    label,
+    kind: resolutionKindFromLabel(label),
+    source: resolution.source,
+    resolutionType: resolution.resolutionType,
+    cachedAt: resolution.cachedAt ?? null,
+    ageMinutes: Number.isFinite(resolution.ageMinutes) ? Number(resolution.ageMinutes.toFixed(2)) : null,
+    stale: Boolean(resolution.stale)
+  });
 }
 
 function addDays(dateString, days) {
@@ -237,7 +294,10 @@ function cachePathFor(kind, identifier) {
   return path.join(PATHS.cacheDir, kind, `${identifier}.json`);
 }
 
-function statePathFor(mode) {
+function statePathFor(mode, artifactProfile = "publish") {
+  if (artifactProfile === "validation") {
+    return path.join(PATHS.validationStateDir, `${mode}.json`);
+  }
   return path.join(PATHS.stateDir, `${mode}.json`);
 }
 
@@ -252,15 +312,17 @@ async function writeCacheEnvelope(filePath, value) {
   });
 }
 
-async function readState(mode) {
-  return (await readJsonIfExists(statePathFor(mode))) ?? {
+async function readState(mode, options = {}) {
+  const statePath = options.statePath ?? statePathFor(mode, options.artifactProfile);
+  return (await readJsonIfExists(statePath)) ?? {
     mode,
     generatedAt: null,
     candidates: {}
   };
 }
 
-async function writeState(mode, candidates) {
+async function writeState(mode, candidates, options = {}) {
+  const statePath = options.statePath ?? statePathFor(mode, options.artifactProfile);
   const payload = {
     mode,
     generatedAt: nowIso(),
@@ -283,7 +345,7 @@ async function writeState(mode, candidates) {
     )
   };
 
-  await writeJson(statePathFor(mode), payload);
+  await writeJson(statePath, payload);
 }
 
 async function getCacheEntry(filePath, ttlMs) {
@@ -293,24 +355,46 @@ async function getCacheEntry(filePath, ttlMs) {
       hasValue: false,
       isFresh: false,
       ageMs: Number.POSITIVE_INFINITY,
+      cachedAt: null,
       value: null
     };
   }
 
-  const ageMs = await getFileAgeMs(filePath);
+  let cachedAt = null;
+  let ageMs = Number.POSITIVE_INFINITY;
+  const cachedTimestamp = typeof envelope.cachedAt === "string" ? Date.parse(envelope.cachedAt) : Number.NaN;
+
+  if (Number.isFinite(cachedTimestamp)) {
+    cachedAt = new Date(cachedTimestamp).toISOString();
+    ageMs = Math.max(0, Date.now() - cachedTimestamp);
+  } else {
+    try {
+      const fileStat = await stat(filePath);
+      cachedAt = new Date(fileStat.mtimeMs).toISOString();
+      ageMs = Math.max(0, Date.now() - fileStat.mtimeMs);
+    } catch {
+      cachedAt = null;
+      ageMs = Number.POSITIVE_INFINITY;
+    }
+  }
+
   return {
     hasValue: true,
     isFresh: ageMs <= ttlMs,
     ageMs,
+    cachedAt,
     value: envelope.value
   };
 }
 
 async function ensureWorkspaceFiles() {
   await mkdir(path.dirname(PATHS.outputJson), { recursive: true });
+  await mkdir(PATHS.validationDataDir, { recursive: true });
   await mkdir(PATHS.reportsDir, { recursive: true });
+  await mkdir(PATHS.validationReportsDir, { recursive: true });
   await mkdir(PATHS.cacheDir, { recursive: true });
   await mkdir(PATHS.stateDir, { recursive: true });
+  await mkdir(PATHS.validationStateDir, { recursive: true });
   await mkdir(PATHS.archiveLiveDir, { recursive: true });
   await ensureJsonFile(PATHS.catalystOverrides, { stock: {}, industry: {} });
 }
@@ -404,10 +488,17 @@ async function resolveWithFallback({
 
   if (cacheEntry.hasValue && cacheEntry.isFresh) {
     recordProvider(runtime, `${staleLabel}:cache-fresh`);
+    const resolution = {
+      source: "cache-fresh",
+      resolutionType: "cache_fresh",
+      cachedAt: cacheEntry.cachedAt,
+      ageMinutes: ageMsToMinutes(cacheEntry.ageMs),
+      stale: false
+    };
+    recordResolution(runtime, staleLabel, resolution);
     return {
       value: cacheEntry.value,
-      source: "cache-fresh",
-      stale: false
+      ...resolution
     };
   }
 
@@ -423,14 +514,17 @@ async function resolveWithFallback({
         recordFallback(runtime, `${staleLabel}:switched-to-${provider.name}`);
       }
 
-      if (cacheEntry.hasValue) {
-        recordFallback(runtime, `${staleLabel}:refreshed-via-${provider.name}`);
-      }
-
+      const resolution = {
+        source: provider.name,
+        resolutionType: "provider",
+        cachedAt: null,
+        ageMinutes: 0,
+        stale: false
+      };
+      recordResolution(runtime, staleLabel, resolution);
       return {
         value,
-        source: provider.name,
-        stale: false
+        ...resolution
       };
     } catch (error) {
       lastError = error;
@@ -442,14 +536,89 @@ async function resolveWithFallback({
     recordProvider(runtime, `${staleLabel}:cache-stale`);
     recordFallback(runtime, `${staleLabel}:using-stale-cache`);
     recordWarning(runtime, `${staleLabel} fell back to stale cache.`);
+    const resolution = {
+      source: "cache-stale",
+      resolutionType: "cache_stale",
+      cachedAt: cacheEntry.cachedAt,
+      ageMinutes: ageMsToMinutes(cacheEntry.ageMs),
+      stale: true
+    };
+    recordResolution(runtime, staleLabel, resolution);
     return {
       value: cacheEntry.value,
-      source: "cache-stale",
-      stale: true
+      ...resolution
     };
   }
 
   throw lastError ?? new Error(`${staleLabel} failed and no cache was available.`);
+}
+
+function buildUniverseFreshness(resolutions) {
+  const universe = resolutions.find((resolution) => resolution.kind === "universe");
+  if (!universe) {
+    return null;
+  }
+
+  return {
+    source: universe.source,
+    resolutionType: universe.resolutionType,
+    cachedAt: universe.cachedAt,
+    ageMinutes: universe.ageMinutes,
+    stale: universe.stale
+  };
+}
+
+function summarizeFreshnessGroup(resolutions, kind) {
+  const matched = resolutions.filter((resolution) => resolution.kind === kind);
+  const ageValues = matched
+    .map((resolution) => resolution.ageMinutes)
+    .filter((ageMinutes) => Number.isFinite(ageMinutes));
+
+  return {
+    total: matched.length,
+    providerCount: matched.filter((resolution) => resolution.resolutionType === "provider").length,
+    cacheFreshCount: matched.filter((resolution) => resolution.resolutionType === "cache_fresh").length,
+    cacheStaleCount: matched.filter((resolution) => resolution.resolutionType === "cache_stale").length,
+    maxAgeMinutes: ageValues.length > 0 ? Number(Math.max(...ageValues).toFixed(2)) : null
+  };
+}
+
+function buildRuntimeMeta(runtime, warnings) {
+  const resolutions = runtime?.resolutions ?? [];
+  const fallbackEvents = runtime?.fallbackEvents ?? [];
+  const warningCount = warnings.length;
+  const staleCacheUsed = resolutions.some(
+    (resolution) => resolution.resolutionType === "cache_stale" || resolution.stale === true
+  );
+  const reasons = [];
+
+  if (warningCount > 0) {
+    reasons.push("warnings_present");
+  }
+  if (fallbackEvents.length > 0) {
+    reasons.push("fallback_events_present");
+  }
+  if (staleCacheUsed) {
+    reasons.push("stale_cache_used");
+  }
+
+  return {
+    dataQuality: {
+      level: reasons.length > 0 ? "degraded" : "normal",
+      reasons
+    },
+    dataFreshness: {
+      universe: buildUniverseFreshness(resolutions),
+      technical: summarizeFreshnessGroup(resolutions, "technical"),
+      profile: summarizeFreshnessGroup(resolutions, "profile")
+    },
+    fallbackSummary: {
+      usedFallback: fallbackEvents.length > 0,
+      staleCacheUsed,
+      warningCount
+    },
+    infoMessages: runtime?.infoMessages ?? []
+  };
 }
 
 async function mapLimit(items, limit, iteratee) {
@@ -1835,8 +2004,85 @@ function summarizePool(candidates, coreSize, watchSize) {
   return { core, watch, dropped };
 }
 
+function formatAgeMinutes(value) {
+  if (!Number.isFinite(value)) {
+    return "N/A";
+  }
+  return `${value.toFixed(2)} 分钟`;
+}
+
+function formatResolutionType(value) {
+  switch (value) {
+    case "provider":
+      return "provider";
+    case "cache_fresh":
+      return "cache_fresh";
+    case "cache_stale":
+      return "cache_stale";
+    default:
+      return value ?? "N/A";
+  }
+}
+
+function formatDataQualityReason(reason) {
+  switch (reason) {
+    case "warnings_present":
+      return "存在抓取告警";
+    case "fallback_events_present":
+      return "使用了备用 provider 或降级链路";
+    case "stale_cache_used":
+      return "使用了过期缓存";
+    default:
+      return reason;
+  }
+}
+
+function formatDataQualityLevel(level) {
+  return level === "degraded" ? "degraded（已降级）" : "normal（正常）";
+}
+
+function formatUniverseFreshness(summary) {
+  if (!summary) {
+    return "N/A";
+  }
+
+  const parts = [
+    `source ${summary.source ?? "N/A"}`,
+    `resolution ${formatResolutionType(summary.resolutionType)}`
+  ];
+
+  if (summary.cachedAt) {
+    parts.push(`cachedAt ${summary.cachedAt}`);
+  }
+  if (Number.isFinite(summary.ageMinutes)) {
+    parts.push(`age ${formatAgeMinutes(summary.ageMinutes)}`);
+  }
+  parts.push(summary.stale ? "stale true" : "stale false");
+  return parts.join("，");
+}
+
+function formatFreshnessAggregate(label, summary) {
+  if (!summary || summary.total === 0) {
+    return `${label} N/A`;
+  }
+
+  return (
+    `${label} total ${summary.total}，provider ${summary.providerCount}，cache_fresh ${summary.cacheFreshCount}` +
+    `，cache_stale ${summary.cacheStaleCount}，maxAge ${formatAgeMinutes(summary.maxAgeMinutes)}`
+  );
+}
+
 function buildReport(result) {
   const lines = [];
+  const qualityReasons = (result.meta.dataQuality?.reasons ?? []).map(formatDataQualityReason);
+  const qualitySummary = result.meta.dataQuality ?? { level: "normal", reasons: [] };
+  const freshness = result.meta.dataFreshness ?? {};
+  const fallbackSummary = result.meta.fallbackSummary ?? {
+    usedFallback: false,
+    staleCacheUsed: false,
+    warningCount: 0
+  };
+
   lines.push("# A股机会池报告");
   lines.push("");
   lines.push(`- 市场日期：${result.meta.marketDate}`);
@@ -1846,6 +2092,14 @@ function buildReport(result) {
   lines.push(`- 观察池：${result.summary.watchCount}`);
   lines.push(`- 剔除：${result.summary.droppedCount}`);
   lines.push(`- 说明：${result.summary.note}`);
+  lines.push(`- 数据质量：${formatDataQualityLevel(qualitySummary.level)}`);
+  lines.push(`- 数据质量原因：${qualityReasons.length > 0 ? qualityReasons.join("；") : "N/A"}`);
+  lines.push(
+    `- 数据来源摘要：universe ${formatUniverseFreshness(freshness.universe)}；${formatFreshnessAggregate("technical", freshness.technical)}；${formatFreshnessAggregate("profile", freshness.profile)}`
+  );
+  lines.push(
+    `- fallback 摘要：usedFallback ${fallbackSummary.usedFallback ? "true" : "false"}；staleCacheUsed ${fallbackSummary.staleCacheUsed ? "true" : "false"}；warningCount ${fallbackSummary.warningCount}`
+  );
   lines.push(`- 置信度说明：${result.meta.confidenceRule}`);
   if (result.meta.preselection?.stats) {
     lines.push(
@@ -1853,6 +2107,15 @@ function buildReport(result) {
     );
   }
   lines.push("");
+  if (qualitySummary.level === "degraded") {
+    lines.push(
+      `> 数据质量提示：当前结果处于降级模式。usedFallback=${fallbackSummary.usedFallback ? "true" : "false"}，staleCacheUsed=${fallbackSummary.staleCacheUsed ? "true" : "false"}，warningCount=${fallbackSummary.warningCount}。`
+    );
+    if (qualityReasons.length > 0) {
+      lines.push(`> 触发原因：${qualityReasons.join("；")}。`);
+    }
+    lines.push("");
+  }
   lines.push("## 核心机会池");
   lines.push("");
   lines.push("| 代码 | 名称 | 总分 | 趋势 | 区间 | 基本面 | 技术面 | 资金面 | 消息面 | 风险扣分 | 行业 |");
@@ -2209,7 +2472,7 @@ async function loadLiveDataset(config, shortlistSize, runtime) {
   const cutoff = allPreselected[shortlistSize - 1]?.preselection.score ?? 0;
 
   return {
-    marketDate: new Date().toISOString().slice(0, 10),
+    marketDate: currentMarketDate(),
     boardLookup,
     themeLookup,
     candidates: enrichedCandidates
@@ -2248,16 +2511,25 @@ async function loadLiveDataset(config, shortlistSize, runtime) {
   };
 }
 
-function latestReportPath(marketDate) {
+function reportPathFor(marketDate, artifactProfile = "publish", validationRunId = null) {
+  if (artifactProfile === "validation") {
+    return path.join(PATHS.validationReportsDir, validationRunId, `${marketDate}.md`);
+  }
   return path.join(PATHS.reportsDir, `${marketDate}.md`);
+}
+
+function outputPathFor(artifactProfile = "publish", validationRunId = null, output = null) {
+  if (output) {
+    return path.resolve(ROOT, output);
+  }
+  if (artifactProfile === "validation") {
+    return path.join(PATHS.validationDataDir, validationRunId, "latest.json");
+  }
+  return PATHS.outputJson;
 }
 
 async function archiveLiveSnapshot(result) {
   const archivePath = path.join(PATHS.archiveLiveDir, `${result.meta.marketDate}.json`);
-  if (await exists(archivePath)) {
-    return archivePath;
-  }
-
   await writeJson(archivePath, result);
   return archivePath;
 }
@@ -2268,7 +2540,20 @@ async function runScan(options = {}) {
   const catalysts = await readJson(PATHS.catalystOverrides);
 
   const mode = options.mode ?? "live";
-  const stateKey = options.stateKey ?? mode;
+  const artifactProfile =
+    options.artifactProfile === "validation"
+      ? "validation"
+      : options.artifactProfile === "publish"
+        ? "publish"
+        : mode === "sample"
+          ? "validation"
+          : "publish";
+  const validationRunId =
+    artifactProfile === "validation"
+      ? String(options.validationRunId ?? `${mode}-validation-${Date.now()}`)
+      : null;
+  const stateKey = options.stateKey ?? (artifactProfile === "validation" ? validationRunId : mode);
+  const statePath = statePathFor(stateKey, artifactProfile);
   const shortlistSize = toNumber(options.shortlistSize, config.pool.shortlistSize);
   const coreSize = toNumber(options.coreSize, config.pool.coreSize);
   const watchSize = toNumber(options.watchSize, config.pool.watchSize);
@@ -2279,9 +2564,16 @@ async function runScan(options = {}) {
   if (mode === "sample") {
     const runtime = createRuntime();
     recordProvider(runtime, "sample-fixture");
+    recordResolution(runtime, "universe", {
+      source: "sample-fixture",
+      resolutionType: "provider",
+      cachedAt: null,
+      ageMinutes: 0,
+      stale: false
+    });
     dataset = await loadSampleDataset();
     dataset.runtime = runtime;
-    warnings.push("当前为样例数据，仅用于验证技能流程。");
+    recordInfo(runtime, "当前为样例数据，仅用于验证技能流程。");
   } else {
     const runtime = createRuntime();
     dataset = await loadLiveDataset(config, shortlistSize, runtime);
@@ -2289,7 +2581,7 @@ async function runScan(options = {}) {
     dataset.runtime = runtime;
   }
 
-  const previousState = await readState(stateKey);
+  const previousState = await readState(stateKey, { statePath, artifactProfile });
 
   const evaluated = dataset.candidates.map(({ snapshot, technical, preselection }) =>
     evaluateCandidate(
@@ -2322,18 +2614,26 @@ async function runScan(options = {}) {
     previousState
   );
 
-  await writeState(stateKey, pools.core.concat(pools.watch, pools.dropped));
+  await writeState(stateKey, pools.core.concat(pools.watch, pools.dropped), { statePath, artifactProfile });
+
+  const runtimeMeta = buildRuntimeMeta(dataset.runtime, warnings);
 
   const result = {
     meta: {
       generatedAt: nowIso(),
       marketDate: dataset.marketDate,
       mode,
+      artifactProfile,
+      validationRunId,
       configVersion: config.version,
       candidatesScanned: evaluated.length,
       warnings,
       providersUsed: dataset.runtime?.providersUsed ?? [],
       fallbackEvents: dataset.runtime?.fallbackEvents ?? [],
+      dataQuality: runtimeMeta.dataQuality,
+      dataFreshness: runtimeMeta.dataFreshness,
+      fallbackSummary: runtimeMeta.fallbackSummary,
+      infoMessages: runtimeMeta.infoMessages,
       confidenceRule: "confidence only measures data and evidence quality; classification only uses total score and risk deduction.",
       preselection: dataset.preselection ?? null,
       historyStateMode: stateKey
@@ -2344,28 +2644,37 @@ async function runScan(options = {}) {
       droppedCount: pools.dropped.length,
       note:
         mode === "sample"
-          ? "样例模式，用于验证技能闭环。"
+          ? "当前为样例数据，不代表实时市场。用于验证技能闭环。"
           : "live 模式，基于公开行情接口和零依赖脚本生成。"
     },
     pools
   };
 
-  const outputPath = options.output ? path.resolve(ROOT, options.output) : PATHS.outputJson;
-  const reportPath = latestReportPath(dataset.marketDate);
+  const outputPath = outputPathFor(artifactProfile, validationRunId, options.output);
+  const reportPath = reportPathFor(dataset.marketDate, artifactProfile, validationRunId);
   await writeJson(outputPath, result);
   await writeText(reportPath, buildReport(result));
 
-  if (mode === "live") {
-    await archiveLiveSnapshot(result);
+  let archivePath = null;
+  if (mode === "live" && artifactProfile === "publish") {
+    archivePath = await archiveLiveSnapshot(result);
   }
 
-  return { result, outputPath, reportPath };
+  return { result, outputPath, reportPath, statePath, artifactProfile, validationRunId, archivePath };
 }
 
 async function runInit() {
   await ensureWorkspaceFiles();
   return {
-    created: [PATHS.catalystOverrides, PATHS.reportsDir, path.dirname(PATHS.outputJson), PATHS.stateDir]
+    created: [
+      PATHS.catalystOverrides,
+      PATHS.reportsDir,
+      PATHS.validationReportsDir,
+      path.dirname(PATHS.outputJson),
+      PATHS.validationDataDir,
+      PATHS.stateDir,
+      PATHS.validationStateDir
+    ]
   };
 }
 
@@ -2377,8 +2686,8 @@ Usage:
   node ./scripts/a_share_opportunity_pool.mjs scan [--mode live|sample] [--shortlist-size 80] [--core-size 10] [--watch-size 20]
 
 Examples:
-  node ./scripts/a_share_opportunity_pool.mjs scan --mode sample
   node ./scripts/a_share_opportunity_pool.mjs scan --mode live --core-size 8 --watch-size 15
+  node ./scripts/a_share_opportunity_pool.mjs scan --mode sample   # writes isolated validation artifacts by default
 `);
 }
 
@@ -2411,11 +2720,14 @@ async function cli() {
         {
           ok: true,
           mode: result.meta.mode,
+          artifactProfile: result.meta.artifactProfile,
           marketDate: result.meta.marketDate,
           outputPath,
           reportPath,
           summary: result.summary,
-          warnings: result.meta.warnings
+          warnings: result.meta.warnings,
+          dataQuality: result.meta.dataQuality,
+          fallbackSummary: result.meta.fallbackSummary
         },
         null,
         2
@@ -2437,6 +2749,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
 export {
   PATHS,
   buildReport,
+  currentMarketDate,
   deriveIndustryBoards,
   deriveThemeLookup,
   enforceIndustryConcentration,

@@ -1,0 +1,8 @@
+# Generated opportunity-pool outputs
+/data/opportunity_pool/archive/
+/data/opportunity_pool/backtest/
+/data/opportunity_pool/cache/
+/data/opportunity_pool/latest.json
+/data/opportunity_pool/state/
+/data/opportunity_pool/validation/
+/reports/

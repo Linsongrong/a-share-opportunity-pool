@@ -36,6 +36,9 @@
 - `meta.providersUsed`
 - `meta.fallbackEvents`
 - `meta.warnings`
+- `meta.dataQuality`
+- `meta.dataFreshness`
+- `meta.fallbackSummary`
 
 ## 快速开始
 
@@ -51,6 +54,11 @@ node .\scripts\validate_a_share_opportunity_pool.mjs
 2. 用内置样例数据跑一遍完整流程
 3. 检查 `SKILL.md`、JSON 输出、Markdown 报告是否齐全
 
+validation 产物会写到隔离目录，不会覆盖正式发布结果：
+
+- `data/opportunity_pool/validation/<run-id>/latest.json`
+- `reports/opportunity_pool/validation/<run-id>/<market-date>.md`
+
 如果你还想验证 live 模式：
 
 ```powershell
@@ -62,6 +70,8 @@ node .\scripts\validate_a_share_opportunity_pool.mjs --live
 ```powershell
 node .\scripts\a_share_opportunity_pool.mjs scan --mode live
 ```
+
+正式发布结果只来自 `scan --mode live`。
 
 常用参数：
 
@@ -115,6 +125,10 @@ node .\scripts\a_share_opportunity_pool.mjs scan --mode live
   - 给 agent 和程序读取
 - `reports/opportunity_pool/YYYY-MM-DD.md`
   - 给人直接阅读
+- `data/opportunity_pool/validation/<run-id>/latest.json`
+  - validation 自检隔离产物
+- `reports/opportunity_pool/validation/<run-id>/<market-date>.md`
+  - validation 自检隔离报告
 
 JSON 里会包含：
 
@@ -195,7 +209,10 @@ Default outputs:
 Caveat:
 
 - replay-lite uses only historically replayable price, volume, technical, and liquidity features for selection
+- `next_open` is the primary execution view
+- `same_close` is kept only as an optimistic reference
 - current ROE, concept, and message fields are retained as labels only and do not drive historical selection
+- replay-lite does not prove that the live four-dimension total-score model has been historically validated
 - backtest outputs now include both gross and net results after transaction costs
 - default transaction-cost assumptions are configurable in `skills/a_share_opportunity_pool/config/scoring.json`
 - current defaults are commission `0.02%` each side with `5 RMB` minimum, transfer fee `0.001%`, and sell-side stamp duty `0.05%`
@@ -207,11 +224,11 @@ Latest replay-lite snapshot (`2026-03-26`, 252 trading days):
 - `200` universe, core `h5`, `same_close`: gross `1.87%`, net `1.77%`
 - `300` universe, core `h5`, `same_close`: gross `1.67%`, net `1.57%`
 - `300` universe, core `h5`, rolling portfolio:
-  - `same_close`: gross cumulative `115.75%`, net cumulative `105.82%`
   - `next_open`: gross cumulative `95.15%`, net cumulative `86.18%`
+  - `same_close`: gross cumulative `115.75%`, net cumulative `105.82%`
 
 Interpretation:
 
 - replay-lite signal quality weakens as the universe expands beyond `100`
-- even after transaction costs, the `300` universe remains positive in this replay-lite setup
-- treat this as a practical validation snapshot, not as strict PIT proof
+- even when it remains positive, treat it as directional evidence only
+- this is a replay-lite validation snapshot, not strict PIT proof for the live four-dimension model
